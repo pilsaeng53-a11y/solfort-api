@@ -1,20 +1,25 @@
 const express = require("express");
+const fetch = require("node-fetch");
 const app = express();
 
-app.use(express.json());
-
-// 테스트 루트
 app.get("/", (req, res) => {
   res.send("Solfort API running 🚀");
 });
 
-// Open Interest 테스트 API
-app.get("/open-interest", (req, res) => {
-  res.json({
-    symbol: "BTC-USDT",
-    openInterest: Math.floor(Math.random() * 1000000),
-    change: (Math.random() * 2 - 1).toFixed(2)
-  });
+// 실제 Open Interest 가져오기
+app.get("/open-interest", async (req, res) => {
+  try {
+    const response = await fetch("https://api.orderly.org/v1/public/interest/BTC-USDT");
+    const data = await response.json();
+
+    res.json({
+      symbol: "BTC-USDT",
+      openInterest: data.data.open_interest,
+      change: data.data.change_24h
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch OI" });
+  }
 });
 
 app.listen(3000, () => {
