@@ -1,48 +1,40 @@
 const express = require("express");
-const {
-  getPositions,
-  getBalances
-} = require("../services/orderExecutionService");
 
 const router = express.Router();
 
+/**
+ * TEMP SAFE ROUTES
+ * portfolio 연결 테스트용
+ */
+
+router.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    message: "Portfolio route is alive"
+  });
+});
+
 router.post("/positions", async (req, res) => {
   try {
-    const {
-      accountId,
-      orderlyKey,
-      orderlySecret
-    } = req.body;
-
-    const result = await getPositions({
-      accountId,
-      orderlyKey,
-      orderlySecret
+    return res.json({
+      ok: true,
+      type: "positions",
+      received: req.body || {}
     });
-
-    res.json(result);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: error.message });
   }
 });
 
 router.post("/balances", async (req, res) => {
   try {
-    const {
-      accountId,
-      orderlyKey,
-      orderlySecret
-    } = req.body;
-
-    const result = await getBalances({
-      accountId,
-      orderlyKey,
-      orderlySecret
+    return res.json({
+      ok: true,
+      type: "balances",
+      received: req.body || {}
     });
-
-    res.json(result);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: error.message });
   }
 });
 
