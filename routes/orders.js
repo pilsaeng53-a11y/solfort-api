@@ -7,6 +7,9 @@ const {
 
 const router = express.Router();
 
+/**
+ * CREATE ORDER
+ */
 router.post("/", async (req, res) => {
   try {
     const {
@@ -16,8 +19,12 @@ router.post("/", async (req, res) => {
       order
     } = req.body;
 
+    // ✅ 필수값 체크 (문법 정상)
     if (!accountId  !orderlyKey  !orderlySecret || !order) {
-      return res.status(400).json({ error: "Missing required fields" });
+      return res.status(400).json({
+        error: "Missing required fields",
+        required: ["accountId", "orderlyKey", "orderlySecret", "order"]
+      });
     }
 
     const result = await createOrder({
@@ -29,10 +36,14 @@ router.post("/", async (req, res) => {
 
     res.json(result);
   } catch (error) {
+    console.error("Create order error:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
+/**
+ * CANCEL ORDER
+ */
 router.delete("/:orderId", async (req, res) => {
   try {
     const {
@@ -43,6 +54,12 @@ router.delete("/:orderId", async (req, res) => {
 
     const { orderId } = req.params;
 
+    if (!accountId  !orderlyKey  !orderlySecret || !orderId) {
+      return res.status(400).json({
+        error: "Missing required fields"
+      });
+    }
+
     const result = await cancelOrder({
       accountId,
       orderlyKey,
@@ -52,10 +69,14 @@ router.delete("/:orderId", async (req, res) => {
 
     res.json(result);
   } catch (error) {
+    console.error("Cancel order error:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
+/**
+ * GET OPEN ORDERS
+ */
 router.post("/open", async (req, res) => {
   try {
     const {
@@ -63,6 +84,12 @@ router.post("/open", async (req, res) => {
       orderlyKey,
       orderlySecret
     } = req.body;
+
+    if (!accountId  !orderlyKey  !orderlySecret) {
+      return res.status(400).json({
+        error: "Missing required fields"
+      });
+    }
 
     const result = await getOpenOrders({
       accountId,
@@ -72,6 +99,7 @@ router.post("/open", async (req, res) => {
 
     res.json(result);
   } catch (error) {
+    console.error("Get open orders error:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
