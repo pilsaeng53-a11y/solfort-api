@@ -25,3 +25,16 @@ app.get("/open-interest", async (req, res) => {
 app.listen(3000, () => {
   console.log("Server running on port 3000");
 });
+
+const fs = require("fs");
+const path = require("path");
+
+app.get("/coin-icons", (req, res) => {
+  try {
+    const filePath = path.join(__dirname, "data", "coin_icon_map.json");
+    const data = fs.readFileSync(filePath, "utf-8");
+    res.json(JSON.parse(data));
+  } catch (err) {
+    res.status(500).json({ error: "Failed to load icons" });
+  }
+});
