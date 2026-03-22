@@ -38,3 +38,13 @@ app.get("/coin-icons", (req, res) => {
     res.status(500).json({ error: "Failed to load icons" });
   }
 });
+
+const coinIconsRoute = require("./routes/coinIcons");
+const marketDataRoute = require("./routes/marketData");
+const aiSignalsRoute = require("./routes/aiSignals");
+const symbolsRoute = require("./routes/symbols");
+
+app.use("/coin-icons", coinIconsRoute);
+app.use("/market-data", marketDataRoute);
+app.use("/ai-signals", aiSignalsRoute);
+app.use("/symbols", symbolsRoute);
