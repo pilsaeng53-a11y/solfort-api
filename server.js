@@ -14,18 +14,20 @@ const userSettingsRoute = require("./routes/userSettings");
 const watchlistsRoute = require("./routes/watchlists");
 const notificationsRoute = require("./routes/notifications");
 
-// mount core routes
+// 3번: orderlyAccount만 추가
+const orderlyAccountRoute = require("./routes/orderlyAccount");
+
 app.use("/coin-icons", coinIconsRoute);
 app.use("/market-data", marketDataRoute);
 app.use("/ai-signals", aiSignalsRoute);
 app.use("/symbols", symbolsRoute);
 
-// mount safe user routes
 app.use("/user-settings", userSettingsRoute);
 app.use("/watchlists", watchlistsRoute);
 app.use("/notifications", notificationsRoute);
 
-// root
+app.use("/orderly-account", orderlyAccountRoute);
+
 app.get("/", (req, res) => {
   res.send("SolFort API running 🚀");
 });
