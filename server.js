@@ -48,3 +48,11 @@ app.use("/coin-icons", coinIconsRoute);
 app.use("/market-data", marketDataRoute);
 app.use("/ai-signals", aiSignalsRoute);
 app.use("/symbols", symbolsRoute);
+
+const userSettingsRoute = require("./routes/userSettings");
+const watchlistsRoute = require("./routes/watchlists");
+const notificationsRoute = require("./routes/notifications");
+
+app.use("/user-settings", userSettingsRoute);
+app.use("/watchlists", watchlistsRoute);
+app.use("/notifications", notificationsRoute);
