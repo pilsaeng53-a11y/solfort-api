@@ -56,3 +56,11 @@ const notificationsRoute = require("./routes/notifications");
 app.use("/user-settings", userSettingsRoute);
 app.use("/watchlists", watchlistsRoute);
 app.use("/notifications", notificationsRoute);
+
+const orderlyAccountRoute = require("./routes/orderlyAccount");
+const ordersRoute = require("./routes/orders");
+const portfolioRoute = require("./routes/portfolio");
+
+app.use("/orderly-account", orderlyAccountRoute);
+app.use("/orders", ordersRoute);
+app.use("/portfolio", portfolioRoute);
