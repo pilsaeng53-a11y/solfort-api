@@ -1,0 +1,9 @@
+{
+  "restBaseUrl": "https://api.orderly.org",
+  "wsBaseUrl": "wss://ws-evm.orderly.org/ws/stream",
+  "brokerId": "",
+  "network": "mainnet",
+  "defaultChainId": 1,
+  "defaultQuoteAsset": "USDC",
+  "requestTimeoutMs": 10000
+}
