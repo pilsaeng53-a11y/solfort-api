@@ -14,8 +14,9 @@ const userSettingsRoute = require("./routes/userSettings");
 const watchlistsRoute = require("./routes/watchlists");
 const notificationsRoute = require("./routes/notifications");
 
-// 3번: orderlyAccount만 추가
+// 3번 + 4번
 const orderlyAccountRoute = require("./routes/orderlyAccount");
+const portfolioRoute = require("./routes/portfolio");
 
 app.use("/coin-icons", coinIconsRoute);
 app.use("/market-data", marketDataRoute);
@@ -27,6 +28,7 @@ app.use("/watchlists", watchlistsRoute);
 app.use("/notifications", notificationsRoute);
 
 app.use("/orderly-account", orderlyAccountRoute);
+app.use("/portfolio", portfolioRoute);
 
 app.get("/", (req, res) => {
   res.send("SolFort API running 🚀");
