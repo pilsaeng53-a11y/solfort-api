@@ -1,41 +1,60 @@
-const express = require("express");
+const fs = require("fs");
+const path = require("path");
 
-const router = express.Router();
+const configPath = path.join(__dirname, "..", "data", "orderly_config.json");
+const orderlyConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
 
-/**
- * TEMP SAFE ROUTES
- * portfolio 연결 테스트용
- */
+function getRestBaseUrl() {
+  return orderlyConfig.restBaseUrl;
+}
 
-router.get("/", (req, res) => {
-  res.json({
+async function createOrder() {
+  return {
     ok: true,
-    message: "Portfolio route is alive"
-  });
-});
+    message: "createOrder placeholder",
+    restBaseUrl: getRestBaseUrl()
+  };
+}
 
-router.post("/positions", async (req, res) => {
-  try {
-    return res.json({
-      ok: true,
-      type: "positions",
-      received: req.body || {}
-    });
-  } catch (error) {
-    return res.status(500).json({ error: error.message });
-  }
-});
+async function cancelOrder() {
+  return {
+    ok: true,
+    message: "cancelOrder placeholder",
+    restBaseUrl: getRestBaseUrl()
+  };
+}
 
-router.post("/balances", async (req, res) => {
-  try {
-    return res.json({
-      ok: true,
-      type: "balances",
-      received: req.body || {}
-    });
-  } catch (error) {
-    return res.status(500).json({ error: error.message });
-  }
-});
+async function getPositions() {
+  return {
+    ok: true,
+    message: "getPositions placeholder",
+    restBaseUrl: getRestBaseUrl(),
+    data: []
+  };
+}
 
-module.exports = router;
+async function getOpenOrders() {
+  return {
+    ok: true,
+    message: "getOpenOrders placeholder",
+    restBaseUrl: getRestBaseUrl(),
+    data: []
+  };
+}
+
+async function getBalances() {
+  return {
+    ok: true,
+    message: "getBalances placeholder",
+    restBaseUrl: getRestBaseUrl(),
+    data: []
+  };
+}
+
+module.exports = {
+  createOrder,
+  cancelOrder,
+  getPositions,
+  getOpenOrders,
+  getBalances
+};
