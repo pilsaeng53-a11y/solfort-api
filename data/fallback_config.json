@@ -1,0 +1,9 @@
+{
+  "fallbackIcon": "/icons/fallback-coin.png",
+  "priceSourcePriority": ["mark", "last", "index"],
+  "defaultAIScore": 50,
+  "defaultAILabel": "중립",
+  "defaultAIConfidence": "보통",
+  "staleAfterMs": 7000,
+  "reconnectDelayMs": 2500
+}
