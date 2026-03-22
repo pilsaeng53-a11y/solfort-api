@@ -1,60 +1,16 @@
-const fs = require("fs");
-const path = require("path");
+const express = require("express");
+const router = express.Router();
 
-const configPath = path.join(__dirname, "..", "data", "orderly_config.json");
-const orderlyConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+router.get("/", (req, res) => {
+  res.json({ ok: true, message: "portfolio alive" });
+});
 
-function getRestBaseUrl() {
-  return orderlyConfig.restBaseUrl;
-}
+router.post("/positions", (req, res) => {
+  res.json({ ok: true, type: "positions", body: req.body || {} });
+});
 
-async function createOrder() {
-  return {
-    ok: true,
-    message: "createOrder placeholder",
-    restBaseUrl: getRestBaseUrl()
-  };
-}
+router.post("/balances", (req, res) => {
+  res.json({ ok: true, type: "balances", body: req.body || {} });
+});
 
-async function cancelOrder() {
-  return {
-    ok: true,
-    message: "cancelOrder placeholder",
-    restBaseUrl: getRestBaseUrl()
-  };
-}
-
-async function getPositions() {
-  return {
-    ok: true,
-    message: "getPositions placeholder",
-    restBaseUrl: getRestBaseUrl(),
-    data: []
-  };
-}
-
-async function getOpenOrders() {
-  return {
-    ok: true,
-    message: "getOpenOrders placeholder",
-    restBaseUrl: getRestBaseUrl(),
-    data: []
-  };
-}
-
-async function getBalances() {
-  return {
-    ok: true,
-    message: "getBalances placeholder",
-    restBaseUrl: getRestBaseUrl(),
-    data: []
-  };
-}
-
-module.exports = {
-  createOrder,
-  cancelOrder,
-  getPositions,
-  getOpenOrders,
-  getBalances
-};
+module.exports = router;
