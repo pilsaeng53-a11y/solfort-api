@@ -1,66 +1,52 @@
 const express = require("express");
-const fetch = require("node-fetch");
 const app = express();
 
-app.get("/", (req, res) => {
-  res.send("Solfort API running 🚀");
-});
+app.use(express.json());
 
-// 실제 Open Interest 가져오기
-app.get("/open-interest", async (req, res) => {
-  try {
-    const response = await fetch("https://api.orderly.org/v1/public/interest/BTC-USDT");
-    const data = await response.json();
-
-    res.json({
-      symbol: "BTC-USDT",
-      openInterest: data.data.open_interest,
-      change: data.data.change_24h
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch OI" });
-  }
-});
-
-app.listen(3000, () => {
-  console.log("Server running on port 3000");
-});
-
-const fs = require("fs");
-const path = require("path");
-
-app.get("/coin-icons", (req, res) => {
-  try {
-    const filePath = path.join(__dirname, "data", "coin_icon_map.json");
-    const data = fs.readFileSync(filePath, "utf-8");
-    res.json(JSON.parse(data));
-  } catch (err) {
-    res.status(500).json({ error: "Failed to load icons" });
-  }
-});
-
+// =====================
+// ROUTES IMPORT
+// =====================
 const coinIconsRoute = require("./routes/coinIcons");
 const marketDataRoute = require("./routes/marketData");
 const aiSignalsRoute = require("./routes/aiSignals");
 const symbolsRoute = require("./routes/symbols");
 
-app.use("/coin-icons", coinIconsRoute);
-app.use("/market-data", marketDataRoute);
-app.use("/ai-signals", aiSignalsRoute);
-app.use("/symbols", symbolsRoute);
-
 const userSettingsRoute = require("./routes/userSettings");
 const watchlistsRoute = require("./routes/watchlists");
 const notificationsRoute = require("./routes/notifications");
-
-app.use("/user-settings", userSettingsRoute);
-app.use("/watchlists", watchlistsRoute);
-app.use("/notifications", notificationsRoute);
 
 const orderlyAccountRoute = require("./routes/orderlyAccount");
 const ordersRoute = require("./routes/orders");
 const portfolioRoute = require("./routes/portfolio");
 
+// =====================
+// ROUTES MOUNT
+// =====================
+app.use("/coin-icons", coinIconsRoute);
+app.use("/market-data", marketDataRoute);
+app.use("/ai-signals", aiSignalsRoute);
+app.use("/symbols", symbolsRoute);
+
+app.use("/user-settings", userSettingsRoute);
+app.use("/watchlists", watchlistsRoute);
+app.use("/notifications", notificationsRoute);
+
 app.use("/orderly-account", orderlyAccountRoute);
 app.use("/orders", ordersRoute);
 app.use("/portfolio", portfolioRoute);
+
+// =====================
+// ROOT TEST
+// =====================
+app.get("/", (req, res) => {
+  res.send("SolFort API running 🚀");
+});
+
+// =====================
+// SERVER START
+// =====================
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
