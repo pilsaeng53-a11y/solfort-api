@@ -17,53 +17,26 @@ const SYMBOL_KEYWORDS = {
   ETH: ["ETH", "Ethereum", "Ether", "이더리움"],
   SOL: ["SOL", "Solana", "솔라나"],
   XRP: ["XRP", "Ripple", "리플"],
+  EURUSD: ["EURUSD", "Euro", "EUR/USD", "유로달러"],
+  USDJPY: ["USDJPY", "USD/JPY", "달러엔"],
+  GBPUSD: ["GBPUSD", "GBP/USD", "파운드달러"],
+  AUDUSD: ["AUDUSD", "AUD/USD", "호주달러"],
+  GOLD: ["Gold", "XAUUSD", "금"],
+  SILVER: ["Silver", "XAGUSD", "은"],
+  NASDAQ: ["Nasdaq", "NAS100", "나스닥"],
+  SP500: ["S&P 500", "SPX500", "SP500", "미국증시"],
   RWA: ["RWA", "real world asset", "real-world asset", "실물자산", "토큰화"]
 };
 
 const BULLISH_KEYWORDS = [
-  "surge",
-  "rally",
-  "jump",
-  "gain",
-  "soar",
-  "approval",
-  "approved",
-  "inflow",
-  "breakout",
-  "adoption",
-  "partnership",
-  "launch",
-  "bullish",
-  "상승",
-  "급등",
-  "호재",
-  "승인",
-  "유입",
-  "돌파",
-  "채택",
-  "출시"
+  "surge", "rally", "jump", "gain", "soar", "approval", "approved", "inflow",
+  "breakout", "adoption", "partnership", "launch", "bullish",
+  "상승", "급등", "호재", "승인", "유입", "돌파", "채택", "출시"
 ];
 
 const BEARISH_KEYWORDS = [
-  "drop",
-  "fall",
-  "crash",
-  "plunge",
-  "hack",
-  "lawsuit",
-  "outflow",
-  "exploit",
-  "delay",
-  "ban",
-  "bearish",
-  "하락",
-  "급락",
-  "악재",
-  "해킹",
-  "소송",
-  "유출",
-  "금지",
-  "지연"
+  "drop", "fall", "crash", "plunge", "hack", "lawsuit", "outflow", "exploit",
+  "delay", "ban", "bearish", "하락", "급락", "악재", "해킹", "소송", "유출", "금지", "지연"
 ];
 
 function normalizeSymbol(input) {
@@ -104,24 +77,9 @@ function detectRegionFromSource(article) {
   const title = String(article?.title || "").toLowerCase();
 
   const koreanHints = [
-    "조선",
-    "중앙",
-    "동아",
-    "연합",
-    "머니투데이",
-    "매일경제",
-    "한국경제",
-    "뉴스1",
-    "뉴시스",
-    "파이낸셜뉴스",
-    "전자신문",
-    "서울경제",
-    "헤럴드",
-    "아시아경제",
-    "coinness",
-    "코인니스",
-    "블록미디어",
-    "디센터"
+    "조선", "중앙", "동아", "연합", "머니투데이", "매일경제", "한국경제",
+    "뉴스1", "뉴시스", "파이낸셜뉴스", "전자신문", "서울경제",
+    "헤럴드", "아시아경제", "coinness", "코인니스", "블록미디어", "디센터"
   ];
 
   const hasKorean = koreanHints.some(
