@@ -450,7 +450,6 @@ function buildCustomOutcome(probYes = 0.5) {
 }
 
 function createBinaryUpDownMarket(symbol, timeframe) {
-  const quote = generateQuote(symbol);
   const resolutionDate = getNextResolutionDate(timeframe.minutes);
   const lockDate = new Date(resolutionDate.getTime() - BET_LOCK_SECONDS * 1000);
 
@@ -462,8 +461,14 @@ function createBinaryUpDownMarket(symbol, timeframe) {
     slug: `${symbol.toLowerCase()}-${timeframe.key}-updown`,
     question: `Will ${symbol} close ${timeframe.label} higher than now?`,
     category: "Crypto",
-    subcategory: timeframe.key,
-
+    subcategory:
+      timeframe.key === "5m" || timeframe.key === "15m"
+        ? "Ultra Short"
+        : timeframe.key === "1h"
+        ? "Hourly"
+        : timeframe.key === "4h"
+        ? "4H"
+        : "Daily",
     marketType: "binary",
     outcomes: [
       {
@@ -477,12 +482,85 @@ function createBinaryUpDownMarket(symbol, timeframe) {
         payout: payoutFromProb(1 - baseProb)
       }
     ],
-
-    volume: Math.floor(Math.random() * 10000),
+    volume: Math.round(5000 + Math.random() * 50000),
     endsAt: resolutionDate.toISOString(),
     lockAt: lockDate.toISOString(),
     lockSeconds: BET_LOCK_SECONDS,
-    status: new Date() >= lockDate ? "locked" : "open"
+    status: new Date() >= lockDate ? "locked" : "open",
+    image: null,
+    metadata: {
+      symbol,
+      timeframe: timeframe.key,
+      resolutionType: "up-down",
+      referenceSymbol: `${symbol}USDT`,
+      lockRule: `Betting closes ${BET_LOCK_SECONDS} seconds before resolution`
+    }
+  };
+}
+
+function createAboveBelowMarket(symbol, timeframe) {
+  const quote = generateQuote(symbol);
+  const resolutionDate = getNextResolutionDate(timeframe.minutes);
+  const lockDate = new Date(resolutionDate.getTime() - BET_LOCK_SECONDS * 1000);
+
+  const current = safeNum(quote.last, 0);
+  const digits = getDigits(symbol);
+
+  const step =
+    symbol === "BTC"
+      ? 250
+      : symbol === "ETH"
+      ? 10
+      : symbol === "SOL"
+      ? 1
+      : symbol === "XRP"
+      ? 0.01
+      : 1;
+
+  const target = roundPrice(current + step, digits);
+  const baseProb = 0.5;
+
+  return {
+    source: "solfort",
+    externalId: `solfort-${symbol.toLowerCase()}-${timeframe.key}-above-${String(target).replace(".", "_")}`,
+    slug: `${symbol.toLowerCase()}-${timeframe.key}-above-${String(target).replace(".", "-")}`,
+    question: `Will ${symbol} settle above ${target} in ${timeframe.label}?`,
+    category: "Crypto",
+    subcategory:
+      timeframe.key === "5m" || timeframe.key === "15m"
+        ? "Ultra Short"
+        : timeframe.key === "1h"
+        ? "Hourly"
+        : timeframe.key === "4h"
+        ? "4H"
+        : "Daily",
+    marketType: "binary",
+    outcomes: [
+      {
+        name: "Yes",
+        probability: baseProb,
+        payout: payoutFromProb(baseProb)
+      },
+      {
+        name: "No",
+        probability: 1 - baseProb,
+        payout: payoutFromProb(1 - baseProb)
+      }
+    ],
+    volume: Math.round(3000 + Math.random() * 30000),
+    endsAt: resolutionDate.toISOString(),
+    lockAt: lockDate.toISOString(),
+    lockSeconds: BET_LOCK_SECONDS,
+    status: new Date() >= lockDate ? "locked" : "open",
+    image: null,
+    metadata: {
+      symbol,
+      timeframe: timeframe.key,
+      resolutionType: "above-below",
+      targetPrice: target,
+      referenceSymbol: `${symbol}USDT`,
+      lockRule: `Betting closes ${BET_LOCK_SECONDS} seconds before resolution`
+    }
   };
 }
 
