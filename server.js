@@ -410,6 +410,145 @@ function buildSymbolList() {
 }
 
 /* =========================
+   SOLFORT CUSTOM CRYPTO PREDICTION MARKETS
+========================= */
+
+const CUSTOM_CRYPTO_SYMBOLS = ["BTC", "ETH", "SOL", "XRP"];
+const CUSTOM_CRYPTO_TIMEFRAMES = [
+  { key: "5m", label: "5 Minutes", minutes: 5 },
+  { key: "15m", label: "15 Minutes", minutes: 15 },
+  { key: "1h", label: "1 Hour", minutes: 60 },
+  { key: "4h", label: "4 Hours", minutes: 240 },
+  { key: "1d", label: "1 Day", minutes: 1440 }
+];
+
+const BET_LOCK_SECONDS = 20;
+
+function getNextResolutionDate(minutes) {
+  const now = new Date();
+  const ms = minutes * 60 * 1000;
+  const next = new Date(Math.ceil(now.getTime() / ms) * ms);
+  return next;
+}
+
+function buildCustomOutcome(probYes = 0.5) {
+  const yesProb = Math.min(Math.max(probYes, 0.05), 0.95);
+  const noProb = Number((1 - yesProb).toFixed(8));
+
+  return [
+    {
+      name: "Yes",
+      probability: Number(yesProb.toFixed(8)),
+      payout: payoutFromProb(yesProb)
+    },
+    {
+      name: "No",
+      probability: noProb,
+      payout: payoutFromProb(noProb)
+    }
+  ];
+}
+
+function createBinaryUpDownMarket(symbol, timeframe) {
+  const quote = generateQuote(symbol);
+  const resolutionDate = getNextResolutionDate(timeframe.minutes);
+  const lockDate = new Date(resolutionDate.getTime() - BET_LOCK_SECONDS * 1000);
+
+  const driftSeed = safeNum(quote.changePercent, 0);
+  const baseProb = 0.5 + Math.max(Math.min(driftSeed / 100, 0.12), -0.12);
+
+  return {
+    source: "solfort",
+    externalId: solfort-${symbol.toLowerCase()}-${timeframe.key}-updown,
+    slug: ${symbol.toLowerCase()}-${timeframe.key}-updown,
+    question: Will ${symbol} close ${timeframe.label} higher than now?,
+    category: "Crypto",
+    subcategory: timeframe.key === "5m" || timeframe.key === "15m"
+      ? "Ultra Short"
+      : timeframe.key === "1h"
+      ? "Hourly"
+      : timeframe.key === "4h"
+      ? "4H"
+      : "Daily",
+    marketType: "binary",
+    outcomes: buildCustomOutcome(baseProb),
+    volume: Math.round(5000 + Math.random() * 50000),
+    endsAt: resolutionDate.toISOString(),
+    lockAt: lockDate.toISOString(),
+    lockSeconds: BET_LOCK_SECONDS,
+    status: new Date() >= lockDate ? "locked" : "open",
+    image: null,
+    metadata: {
+      symbol,
+      timeframe: timeframe.key,
+      resolutionType: "up-down",
+      referenceSymbol: ${symbol}USDT,
+      lockRule: Betting closes ${BET_LOCK_SECONDS} seconds before resolution
+    }
+  };
+}
+
+function createAboveBelowMarket(symbol, timeframe) {
+  const quote = generateQuote(symbol);
+  const resolutionDate = getNextResolutionDate(timeframe.minutes);
+  const lockDate = new Date(resolutionDate.getTime() - BET_LOCK_SECONDS * 1000);
+
+  const current = safeNum(quote.last, 0);
+  const digits = getDigits(symbol);
+  const step =
+    symbol === "BTC" ? 250 :
+    symbol === "ETH" ? 10 :
+    symbol === "SOL" ? 1 :
+    symbol === "XRP" ? 0.01 : 1;
+
+  const target = roundPrice(current + step, digits);
+  const baseProb = 0.48 + Math.random() * 0.08;
+
+  return {
+    source: "solfort",
+    externalId: solfort-${symbol.toLowerCase()}-${timeframe.key}-above-${String(target).replace(".", "_")},
+    slug: ${symbol.toLowerCase()}-${timeframe.key}-above-${String(target).replace(".", "-")},
+    question: Will ${symbol} settle above ${target} in ${timeframe.label}?,
+    category: "Crypto",
+    subcategory: timeframe.key === "5m" || timeframe.key === "15m"
+      ? "Ultra Short"
+      : timeframe.key === "1h"
+      ? "Hourly"
+      : timeframe.key === "4h"
+      ? "4H"
+      : "Daily",
+    marketType: "binary",
+    outcomes: buildCustomOutcome(baseProb),
+    volume: Math.round(3000 + Math.random() * 30000),
+    endsAt: resolutionDate.toISOString(),
+    lockAt: lockDate.toISOString(),
+    lockSeconds: BET_LOCK_SECONDS,
+    status: new Date() >= lockDate ? "locked" : "open",
+    image: null,
+    metadata: {
+      symbol,
+      timeframe: timeframe.key,
+      resolutionType: "above-below",
+      targetPrice: target,
+      referenceSymbol: ${symbol}USDT,
+      lockRule: Betting closes ${BET_LOCK_SECONDS} seconds before resolution
+    }
+  };
+}
+function generateCustomCryptoPredictionMarkets() {
+  const rows = [];
+
+  for (const symbol of CUSTOM_CRYPTO_SYMBOLS) {
+    for (const timeframe of CUSTOM_CRYPTO_TIMEFRAMES) {
+      rows.push(createBinaryUpDownMarket(symbol, timeframe));
+      rows.push(createAboveBelowMarket(symbol, timeframe));
+    }
+  }
+
+  return rows;
+}
+
+/* =========================
    PREDICTION FETCHERS
 ========================= */
 
@@ -600,8 +739,9 @@ async function refreshPredictionMarkets() {
 
     const polyMarkets = poly.status === "fulfilled" ? poly.value : [];
     const kalshiMarkets = kalshi.status === "fulfilled" ? kalshi.value : [];
+    const customMarkets = generateCustomCryptoPredictionMarkets();
 
-    let merged = [...polyMarkets, ...kalshiMarkets];
+    let merged = [...polyMarkets, ...kalshiMarkets, ...customMarkets];
     merged = sanitizePredictionMarkets(merged);
     merged = dedupePredictionMarkets(merged);
     merged = rankPredictionMarkets(merged);
@@ -617,11 +757,12 @@ async function refreshPredictionMarkets() {
       lastError: null,
       polymarketCount: polyMarkets.length,
       kalshiCount: kalshiMarkets.length,
-      totalMerged: merged.length
+      totalMerged: merged.length,
+      customCount: customMarkets.length
     };
 
     console.log(
-      `[prediction] updated=${predictionCache.updatedAt} total=${merged.length} poly=${polyMarkets.length} kalshi=${kalshiMarkets.length}`
+      [prediction] updated=${predictionCache.updatedAt} total=${merged.length} poly=${polyMarkets.length} kalshi=${kalshiMarkets.length} custom=${customMarkets.length}
     );
   } catch (e) {
     predictionCache.stats.lastRefreshStatus = "failed";
@@ -631,6 +772,7 @@ async function refreshPredictionMarkets() {
     isPredictionRefreshing = false;
   }
 }
+
 
 /* =========================
    HEALTH
