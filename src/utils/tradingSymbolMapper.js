@@ -9,6 +9,8 @@ export function normalizeSymbol(input) {
   const parts = raw.split("-").filter(Boolean);
   const ignore = ["PERP", "USDT", "USDC", "USD", "T"];
 
+  if (parts.length === 1) return raw;
+
   const base = parts.find((p) => !ignore.includes(p));
   return base || parts[0] || raw;
 }
