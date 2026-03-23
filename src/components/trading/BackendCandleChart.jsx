@@ -3,20 +3,17 @@ import { createChart, CrosshairMode } from "lightweight-charts";
 import { useFuturesCandles } from "../../hooks/useFuturesCandles";
 import { useFuturesQuote } from "../../hooks/useFuturesQuote";
 import { normalizeSymbol } from "../../utils/tradingSymbolMapper";
+import { useLiveCandleSeries } from "../../hooks/useLiveCandleSeries";
 
 function toChartData(candles = []) {
   return candles
-    .map((item) => {
-      const t = Math.floor(new Date(item.time).getTime() / 1000);
-
-      return {
-        time: t,
-        open: Number(item.open),
-        high: Number(item.high),
-        low: Number(item.low),
-        close: Number(item.close),
-      };
-    })
+    .map((item) => ({
+      time: Math.floor(new Date(item.time).getTime() / 1000),
+      open: Number(item.open),
+      high: Number(item.high),
+      low: Number(item.low),
+      close: Number(item.close),
+    }))
     .filter(
       (item) =>
         Number.isFinite(item.time) &&
@@ -32,6 +29,13 @@ function getPricePrecision(symbol) {
   if (symbol === "USDJPY") return 3;
   if (symbol === "XRP") return 4;
   return 2;
+}
+
+function getMinMove(symbol) {
+  if (["EURUSD", "GBPUSD", "AUDUSD"].includes(symbol)) return 0.00001;
+  if (symbol === "USDJPY") return 0.001;
+  if (symbol === "XRP") return 0.0001;
+  return 0.01;
 }
 
 export default function BackendCandleChart({
@@ -50,7 +54,13 @@ export default function BackendCandleChart({
     300
   );
 
-  const { quote } = useFuturesQuote(normalizedSymbol);
+  const { quote, connectionState } = useFuturesQuote(normalizedSymbol);
+  const mergedCandles = useLiveCandleSeries(
+    normalizedSymbol,
+    candles,
+    quote,
+    interval
+  );
 
   const containerRef = useRef(null);
   const chartRef = useRef(null);
@@ -58,7 +68,7 @@ export default function BackendCandleChart({
   const priceLineRef = useRef(null);
 
   const pricePrecision = getPricePrecision(normalizedSymbol);
-  const chartData = useMemo(() => toChartData(candles), [candles]);
+  const chartData = useMemo(() => toChartData(mergedCandles), [mergedCandles]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -97,7 +107,7 @@ export default function BackendCandleChart({
       priceFormat: {
         type: "price",
         precision: pricePrecision,
-        minMove: pricePrecision >= 5 ? 0.00001 : pricePrecision === 4 ? 0.0001 : pricePrecision === 3 ? 0.001 : 0.01,
+        minMove: getMinMove(normalizedSymbol),
       },
     });
 
@@ -124,7 +134,7 @@ export default function BackendCandleChart({
       candleSeriesRef.current = null;
       priceLineRef.current = null;
     };
-  }, [height, pricePrecision]);
+  }, [height, pricePrecision, normalizedSymbol]);
 
   useEffect(() => {
     if (!candleSeriesRef.current) return;
@@ -136,14 +146,13 @@ export default function BackendCandleChart({
   }, [chartData]);
 
   useEffect(() => {
-    if (!candleSeriesRef.current) return;
-    if (!quote?.last) return;
+    if (!candleSeriesRef.current || !quote?.last) return;
 
     if (priceLineRef.current) {
       try {
         candleSeriesRef.current.removePriceLine(priceLineRef.current);
       } catch {
-        // ignore
+        //
       }
     }
 
@@ -173,6 +182,9 @@ export default function BackendCandleChart({
           <div className="text-xs text-white/50">Last Price</div>
           <div className="text-emerald-400 font-bold">
             {quote?.last ?? "-"}
+          </div>
+          <div className="text-[11px] text-white/40 mt-1">
+            {connectionState}
           </div>
         </div>
       </div>
