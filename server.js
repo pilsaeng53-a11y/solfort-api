@@ -1,5 +1,8 @@
+// server.js (FULL VERSION - SOLFORT + NEWS)
+
 const express = require("express");
 const cors = require("cors");
+const { getNewsBySymbol } = require("./services/newsService");
 
 const app = express();
 
@@ -26,7 +29,8 @@ function pick(...vals) {
 function normalizeSymbol(input) {
   if (!input) return "";
 
-  let raw = input.toUpperCase()
+  let raw = String(input)
+    .toUpperCase()
     .replace(/_/g, "-")
     .replace(/\//g, "-");
 
@@ -34,7 +38,6 @@ function normalizeSymbol(input) {
   const ignore = ["PERP", "USDT", "USDC", "USD"];
 
   const base = parts.find((p) => !ignore.includes(p));
-
   return base || parts[0];
 }
 
@@ -42,6 +45,7 @@ function resolveTradingPrice(s) {
   if (!s) return null;
 
   return pick(
+    s.liveTradingPrice,
     s.markPrice,
     s.lastPrice,
     s.price,
@@ -56,8 +60,15 @@ function resolveTradingPrice(s) {
 ========================= */
 
 app.get("/", (req, res) => {
-  res.json({ ok: true, service: "SolFort API" });
+  res.json({
+    ok: true,
+    service: "SolFort API"
+  });
 });
+
+/* =========================
+   MARKET DATA
+========================= */
 
 app.get("/market-data", (req, res) => {
   const raw = [
@@ -72,6 +83,18 @@ app.get("/market-data", (req, res) => {
       markPrice: "118220.2",
       lastPrice: "118210.8",
       indexPrice: "118215.5"
+    },
+    {
+      symbol: "SOL-PERP",
+      markPrice: "191.22",
+      lastPrice: "191.18",
+      indexPrice: "191.11"
+    },
+    {
+      symbol: "XRP-PERP",
+      markPrice: "1.447",
+      lastPrice: "1.444",
+      indexPrice: "1.445"
     }
   ];
 
@@ -81,8 +104,52 @@ app.get("/market-data", (req, res) => {
     liveTradingPrice: resolveTradingPrice(item)
   }));
 
-  res.json({ success: true, data });
+  res.json({
+    success: true,
+    data
+  });
 });
+
+/* =========================
+   NEWS
+   Example:
+   /news?symbol=BTC
+   /news?symbol=ETH&limit=10
+========================= */
+
+app.get("/news", async (req, res) => {
+  try {
+    const symbol = normalizeSymbol(req.query.symbol || "");
+    const limit = Math.min(Number(req.query.limit) || 20, 50);
+
+    if (!symbol) {
+      return res.status(400).json({
+        success: false,
+        message: "symbol query is required"
+      });
+    }
+
+    const articles = await getNewsBySymbol(symbol, limit);
+
+    res.json({
+      success: true,
+      symbol,
+      count: articles.length,
+      data: articles
+    });
+  } catch (error) {
+    console.error("/news error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch news"
+    });
+  }
+});
+
+/* =========================
+   SALES SUBMIT
+========================= */
 
 app.post("/sales/submit", (req, res) => {
   const {
