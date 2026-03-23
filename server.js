@@ -1,4 +1,4 @@
-// server.js (FULL VERSION - SOLFORT PRE-DB MARKET ENGINE)
+// server.js (FULL VERSION - SOLFORT PRE-DB MARKET ENGINE + PREDICTION AGGREGATOR)
 
 const express = require("express");
 const cors = require("cors");
@@ -37,6 +37,18 @@ const SYMBOL_CONFIG = {
 };
 
 const STREAM_INTERVAL_MS = 1500;
+
+/* =========================
+   PREDICTION AGGREGATOR CONFIG
+========================= */
+
+const PREDICTION_REFRESH_MS = 60 * 1000;
+
+const predictionCache = {
+  updatedAt: null,
+  markets: [],
+  categories: []
+};
 
 /* =========================
    UTILS
@@ -105,6 +117,76 @@ function getDigits(symbol) {
 function pseudoRandom(seed) {
   const x = Math.sin(seed) * 10000;
   return x - Math.floor(x);
+}
+
+function safeNum(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function payoutFromProb(prob) {
+  const p = safeNum(prob, 0);
+  if (p <= 0) return null;
+  return Number((1 / p).toFixed(2));
+}
+
+function titleCase(s) {
+  return String(s || "")
+    .replace(/[-_]/g, " ")
+    .replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+function normalizePredictionCategory(input) {
+  const raw = String(input || "").trim().toLowerCase();
+
+  const map = {
+    trending: "Trending",
+    elections: "Elections",
+    politics: "Politics",
+    sports: "Sports",
+    culture: "Culture",
+    crypto: "Crypto",
+    climate: "Climate",
+    economy: "Economics",
+    economics: "Economics",
+    mentions: "Global",
+    companies: "Companies",
+    company: "Companies",
+    financials: "Financials",
+    finance: "Financials",
+    tech: "Tech & Science",
+    technology: "Tech & Science",
+    science: "Tech & Science",
+    global: "Global"
+  };
+
+  return map[raw] || titleCase(raw || "Global");
+}
+
+function buildPredictionCategories(markets) {
+  const set = new Set();
+  for (const market of markets) {
+    if (market.category) set.add(market.category);
+  }
+  return Array.from(set);
+}
+
+function rankPredictionMarkets(markets) {
+  return markets.map((m) => {
+    const volume = safeNum(m.volume, 0);
+    const highestPayout = Math.max(
+      ...((m.outcomes || []).map((o) => safeNum(o.payout, 0)).length
+        ? m.outcomes.map((o) => safeNum(o.payout, 0))
+        : [0])
+    );
+
+    return {
+      ...m,
+      highestPayout,
+      popularityScore: volume,
+      trendingScore: volume + highestPayout * 1000
+    };
+  });
 }
 
 function generateQuote(symbol) {
@@ -235,8 +317,184 @@ function getHealthChecks() {
     candles: true,
     newsService: true,
     salesSubmit: true,
-    websocket: true
+    websocket: true,
+    predictionAggregator: true
   };
+}
+
+/* =========================
+   PREDICTION AGGREGATOR
+========================= */
+
+async function fetchPolymarketMarkets() {
+  const url = "https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=200";
+  const res = await fetch(url);
+
+  if (!res.ok) {
+    throw new Error(`Polymarket fetch failed: ${res.status}`);
+  }
+
+  const rows = await res.json();
+
+  return rows.map((row) => {
+    let outcomes = [];
+    let prices = [];
+
+    try {
+      outcomes = JSON.parse(row.outcomes || "[]");
+    } catch {}
+
+    try {
+      prices = JSON.parse(row.outcomePrices || "[]");
+    } catch {}
+
+    const mappedOutcomes = outcomes.map((name, idx) => {
+      const prob = safeNum(prices[idx], 0);
+      return {
+        name,
+        probability: prob,
+        payout: payoutFromProb(prob)
+      };
+    });
+
+    const tagNames = Array.isArray(row.tags)
+      ? row.tags.map((t) => t?.label || t?.name).filter(Boolean)
+      : [];
+
+    const guessedCategory = normalizePredictionCategory(tagNames[0] || "Crypto");
+
+    return {
+      source: "polymarket",
+      externalId: String(row.id),
+      slug: row.slug || "",
+      question: row.question || row.title || "",
+      category: guessedCategory,
+      subcategory: tagNames[1] || guessedCategory,
+      marketType: mappedOutcomes.length > 2 ? "multi" : "binary",
+      outcomes: mappedOutcomes,
+      volume: safeNum(row.volume, 0),
+      endsAt: row.endDate || row.end_date_iso || null,
+      image: row.image || null
+    };
+  });
+}
+
+async function fetchKalshiEventsAndMarkets() {
+  const endpoints = [
+    "https://api.elections.kalshi.com/trade-api/v2/events?limit=200",
+    "https://api.elections.kalshi.com/trade-api/v2/events?status=open&limit=200"
+  ];
+
+  let json = null;
+
+  for (const endpoint of endpoints) {
+    try {
+      const res = await fetch(endpoint);
+      if (!res.ok) continue;
+      json = await res.json();
+      if (json) break;
+    } catch {
+      // try next endpoint
+    }
+  }
+
+  if (!json) {
+    throw new Error("Kalshi fetch failed");
+  }
+
+  const events = json.events || json.data?.events || [];
+  const markets = [];
+
+  for (const event of events) {
+    const category = normalizePredictionCategory(
+      event.category || event.series_ticker || event.series_title || "Global"
+    );
+
+    const eventMarkets = Array.isArray(event.markets) ? event.markets : [];
+
+    for (const m of eventMarkets) {
+      const yesProbRaw = safeNum(
+        m.yes_ask ?? m.last_price ?? m.yes_bid ?? m.yes_price,
+        0
+      );
+
+      const yesProb = yesProbRaw > 1 ? yesProbRaw / 100 : yesProbRaw;
+      const noProb = Math.max(0, 1 - yesProb);
+
+      markets.push({
+        source: "kalshi",
+        externalId: String(m.ticker || event.ticker || `${event.title}-${m.subtitle || "yesno"}`),
+        slug: m.ticker || event.ticker || "",
+        question: event.title || event.subtitle || event.ticker || "",
+        category,
+        subcategory: titleCase(event.series_ticker || category),
+        marketType: "binary",
+        outcomes: [
+          {
+            name: "Yes",
+            probability: yesProb,
+            payout: payoutFromProb(yesProb)
+          },
+          {
+            name: "No",
+            probability: noProb,
+            payout: payoutFromProb(noProb)
+          }
+        ],
+        volume: safeNum(m.volume, 0),
+        endsAt: event.close_time || event.expiration_date || null,
+        image: null
+      });
+    }
+  }
+
+  return markets;
+}
+
+async function refreshPredictionMarkets() {
+  const [poly, kalshi] = await Promise.allSettled([
+    fetchPolymarketMarkets(),
+    fetchKalshiEventsAndMarkets()
+  ]);
+
+  const merged = [
+    ...(poly.status === "fulfilled" ? poly.value : []),
+    ...(kalshi.status === "fulfilled" ? kalshi.value : [])
+  ];
+
+  const ranked = rankPredictionMarkets(merged);
+
+  predictionCache.markets = ranked;
+  predictionCache.categories = buildPredictionCategories(ranked);
+  predictionCache.updatedAt = new Date().toISOString();
+}
+
+function filterPredictionMarkets({ category, source, sort }) {
+  let rows = [...predictionCache.markets];
+
+  if (category) {
+    rows = rows.filter(
+      (m) => String(m.category).toLowerCase() === String(category).toLowerCase()
+    );
+  }
+
+  if (source) {
+    rows = rows.filter(
+      (m) => String(m.source).toLowerCase() === String(source).toLowerCase()
+    );
+  }
+
+  if (sort === "highest-odds") {
+    rows.sort((a, b) => safeNum(b.highestPayout, 0) - safeNum(a.highestPayout, 0));
+  } else if (sort === "popular") {
+    rows.sort((a, b) => safeNum(b.popularityScore, 0) - safeNum(a.popularityScore, 0));
+  } else if (sort === "trending") {
+    rows.sort((a, b) => safeNum(b.trendingScore, 0) - safeNum(a.trendingScore, 0));
+  } else {
+    rows.sort((a, b) => safeNum(b.popularityScore, 0) - safeNum(a.popularityScore, 0));
+  }
+
+  return rows;
 }
 
 /* =========================
@@ -455,6 +713,85 @@ app.post("/sales/submit", (req, res) => {
 });
 
 /* =========================
+   PREDICTION MARKET ROUTES
+========================= */
+
+app.get("/prediction/health", (req, res) => {
+  res.json({
+    success: true,
+    updatedAt: predictionCache.updatedAt,
+    totalMarkets: predictionCache.markets.length,
+    categories: predictionCache.categories
+  });
+});
+
+app.get("/prediction/categories", (req, res) => {
+  res.json({
+    success: true,
+    updatedAt: predictionCache.updatedAt,
+    data: predictionCache.categories
+  });
+});
+
+app.get("/prediction/markets", (req, res) => {
+  const {
+    category = "",
+    source = "",
+    sort = "popular",
+    limit = "100"
+  } = req.query;
+
+  const rows = filterPredictionMarkets({ category, source, sort }).slice(
+    0,
+    Math.max(1, Math.min(Number(limit) || 100, 500))
+  );
+
+  res.json({
+    success: true,
+    updatedAt: predictionCache.updatedAt,
+    count: rows.length,
+    data: rows
+  });
+});
+
+app.get("/prediction/top", (req, res) => {
+  const highestOdds = filterPredictionMarkets({ sort: "highest-odds" }).slice(0, 20);
+  const mostPopular = filterPredictionMarkets({ sort: "popular" }).slice(0, 20);
+  const trending = filterPredictionMarkets({ sort: "trending" }).slice(0, 20);
+
+  res.json({
+    success: true,
+    updatedAt: predictionCache.updatedAt,
+    data: {
+      highestOdds,
+      mostPopular,
+      trending
+    }
+  });
+});
+
+app.get("/prediction/market/:source/:id", (req, res) => {
+  const { source, id } = req.params;
+
+  const market = predictionCache.markets.find(
+    (m) => m.source === source && String(m.externalId) === String(id)
+  );
+
+  if (!market) {
+    return res.status(404).json({
+      success: false,
+      message: "Market not found"
+    });
+  }
+
+  res.json({
+    success: true,
+    updatedAt: predictionCache.updatedAt,
+    data: market
+  });
+});
+
+/* =========================
    WEBSOCKET STREAM
 ========================= */
 
@@ -532,7 +869,19 @@ wss.on("connection", (ws, req) => {
   });
 });
 
-/* ========================= */
+/* =========================
+   STARTUP
+========================= */
+
+refreshPredictionMarkets().catch((e) => {
+  console.error("Initial prediction refresh failed:", e);
+});
+
+setInterval(() => {
+  refreshPredictionMarkets().catch((e) => {
+    console.error("Prediction refresh failed:", e);
+  });
+}, PREDICTION_REFRESH_MS);
 
 const PORT = process.env.PORT || 3000;
 
