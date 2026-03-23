@@ -1,26 +1,24 @@
-// server.js (FULL VERSION - SOLFORT)
-
 const express = require("express");
 const cors = require("cors");
 
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 
 /* =========================
-   공용 유틸
+   유틸
 ========================= */
 
 function toNumber(value) {
-  if (value === null || value === undefined || value === "") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
 
-function pickFirstValid(...values) {
-  for (const v of values) {
+function pick(...vals) {
+  for (const v of vals) {
     const n = toNumber(v);
-    if (n !== null && n > 0) return n;
+    if (n && n > 0) return n;
   }
   return null;
 }
@@ -28,110 +26,85 @@ function pickFirstValid(...values) {
 function normalizeSymbol(input) {
   if (!input) return "";
 
-  let raw = String(input).trim().toUpperCase();
-  raw = raw.replace(/\s+/g, "");
-  raw = raw.replace(/\//g, "-");
-  raw = raw.replace(/_/g, "-");
+  let raw = input.toUpperCase()
+    .replace(/_/g, "-")
+    .replace(/\//g, "-");
 
-  const KNOWN_QUOTES = ["USDT", "USDC", "USD", "PERP", "BUSD", "BTC", "ETH"];
+  const parts = raw.split("-");
+  const ignore = ["PERP", "USDT", "USDC", "USD"];
 
-  const parts = raw.split("-").filter(Boolean);
+  const base = parts.find((p) => !ignore.includes(p));
 
-  if (parts.length === 1) return raw;
-
-  const filtered = parts.filter((p) => p !== "PERP");
-  const base = filtered.find((p) => !KNOWN_QUOTES.includes(p));
-
-  return base || filtered[0] || parts[0];
+  return base || parts[0];
 }
 
-function resolveTradingPrice(source) {
-  if (!source) return null;
+function resolveTradingPrice(s) {
+  if (!s) return null;
 
-  return pickFirstValid(
-    source.markPrice,
-    source.mark_price,
-
-    source.lastPrice,
-    source.last_price,
-    source.price,
-    source.tradePrice,
-    source.trade_price,
-    source.close,
-    source.closePrice,
-
-    source.indexPrice,
-    source.index_price
+  return pick(
+    s.markPrice,
+    s.lastPrice,
+    s.price,
+    s.tradePrice,
+    s.close,
+    s.indexPrice
   );
 }
 
 /* =========================
-   기본 라우트
+   ROUTES
 ========================= */
 
 app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    service: "SolFort API",
-  });
+  res.json({ ok: true, service: "SolFort API" });
 });
 
-/* =========================
-   MARKET DATA (핵심)
-========================= */
+app.get("/market-data", (req, res) => {
+  const raw = [
+    {
+      symbol: "ETH-PERP",
+      markPrice: "3824.17",
+      lastPrice: "3823.90",
+      indexPrice: "3824.01"
+    },
+    {
+      symbol: "BTC-PERP",
+      markPrice: "118220.2",
+      lastPrice: "118210.8",
+      indexPrice: "118215.5"
+    }
+  ];
 
-app.get("/market-data", async (req, res) => {
-  try {
-    // TODO: 실제 거래소 API로 교체
-    const raw = [
-      {
-        symbol: "ETH-PERP",
-        markPrice: "3824.17",
-        lastPrice: "3823.90",
-        indexPrice: "3824.01",
-        marketCap: "999999999", // ❌ 절대 사용 금지
-      },
-      {
-        symbol: "BTC-PERP",
-        markPrice: "118220.2",
-        lastPrice: "118210.8",
-        indexPrice: "118215.5",
-        marketCap: "999999999",
-      },
-    ];
+  const data = raw.map((item) => ({
+    symbol: item.symbol,
+    normalizedSymbol: normalizeSymbol(item.symbol),
+    liveTradingPrice: resolveTradingPrice(item)
+  }));
 
-    const data = raw.map((item) => ({
-      symbol: item.symbol,
-      normalizedSymbol: normalizeSymbol(item.symbol),
+  res.json({ success: true, data });
+});
 
-      markPrice: item.markPrice,
-      lastPrice: item.lastPrice,
-      indexPrice: item.indexPrice,
+app.post("/sales/submit", (req, res) => {
+  const {
+    customerName,
+    walletAddress,
+    sales,
+    quantity,
+    price,
+    promotion,
+    sofAmount
+  } = req.body;
 
-      // ✅ 핵심
-      liveTradingPrice: resolveTradingPrice(item),
-    }));
-
-    res.json({
-      success: true,
-      data,
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({
+  if (!customerName || !walletAddress) {
+    return res.status(400).json({
       success: false,
-      message: "market data error",
+      message: "필수값 누락"
     });
   }
-});
 
-/* =========================
-   SALES SUBMIT
-========================= */
-
-app.post("/sales/submit", async (req, res) => {
-  try {
-    const {
+  res.json({
+    success: true,
+    data: {
       customerName,
       walletAddress,
       sales,
@@ -139,33 +112,9 @@ app.post("/sales/submit", async (req, res) => {
       price,
       promotion,
       sofAmount,
-    } = req.body;
-
-    if (!customerName || !walletAddress) {
-      return res.status(400).json({
-        success: false,
-        message: "필수값 누락",
-      });
+      createdAt: new Date().toISOString()
     }
-
-    res.json({
-      success: true,
-      data: {
-        customerName,
-        walletAddress,
-        sales,
-        quantity,
-        price,
-        promotion,
-        sofAmount,
-        createdAt: new Date().toISOString(),
-      },
-    });
-  } catch (err) {
-    res.status(500).json({
-      success: false,
-    });
-  }
+  });
 });
 
 /* ========================= */
