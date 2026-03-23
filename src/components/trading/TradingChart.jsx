@@ -1,42 +1,34 @@
-import React, { useEffect, useMemo, useRef } from "react";
-import { useSelectedTradingInstrument } from "../../hooks/useSelectedTradingInstrument";
+import React, { useState } from "react";
+import BackendCandleChart from "./BackendCandleChart";
+
+const intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
 
 export default function TradingChart({ selectedSymbol }) {
-  const containerRef = useRef(null);
-  const widgetRef = useRef(null);
+  const [interval, setInterval] = useState("15m");
 
-  const { tradingViewSymbol } = useSelectedTradingInstrument(selectedSymbol);
+  return (
+    <div className="w-full h-full flex flex-col gap-3">
+      <div className="flex items-center gap-2 px-2">
+        {intervals.map((item) => (
+          <button
+            key={item}
+            onClick={() => setInterval(item)}
+            className={`px-3 py-1.5 rounded-lg text-sm border ${
+              interval === item
+                ? "bg-emerald-500/15 text-emerald-400 border-emerald-400/50"
+                : "bg-white/5 text-white/60 border-white/10 hover:bg-white/10"
+            }`}
+          >
+            {item}
+          </button>
+        ))}
+      </div>
 
-  useEffect(() => {
-    if (!containerRef.current) return;
-
-    if (widgetRef.current) {
-      widgetRef.current.remove();
-      widgetRef.current = null;
-    }
-
-    widgetRef.current = new window.TradingView.widget({
-      autosize: true,
-      symbol: tradingViewSymbol,
-      interval: "15",
-      timezone: "Etc/UTC",
-      theme: "dark",
-      style: "1",
-      locale: "en",
-      enable_publishing: false,
-      allow_symbol_change: false,
-      hide_top_toolbar: false,
-      hide_side_toolbar: false,
-      container: containerRef.current,
-    });
-
-    return () => {
-      if (widgetRef.current) {
-        widgetRef.current.remove();
-        widgetRef.current = null;
-      }
-    };
-  }, [tradingViewSymbol]);
-
-  return <div ref={containerRef} className="w-full h-full min-h-[500px]" />;
+      <BackendCandleChart
+        selectedSymbol={selectedSymbol}
+        interval={interval}
+        height={520}
+      />
+    </div>
+  );
 }
