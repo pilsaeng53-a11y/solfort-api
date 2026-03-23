@@ -1,56 +1,135 @@
-const express = require("express");
-const app = express();
+// server.js (FULL VERSION - SOLFORT)
 
+const express = require("express");
+const cors = require("cors");
+
+const app = express();
+app.use(cors());
 app.use(express.json());
 
-// =====================
-// CORE ROUTES
-// =====================
-const coinIconsRoute = require("./routes/coinIcons");
-const marketDataRoute = require("./routes/marketData");
-const aiSignalsRoute = require("./routes/aiSignals");
-const symbolsRoute = require("./routes/symbols");
+/* =========================
+   공용 유틸
+========================= */
 
-// =====================
-// SAFE USER ROUTES
-// =====================
-const userSettingsRoute = require("./routes/userSettings");
-const watchlistsRoute = require("./routes/watchlists");
-const notificationsRoute = require("./routes/notifications");
+function toNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
 
-// =====================
-// ORDERLY / TRADING ROUTES
-// =====================
-const orderlyAccountRoute = require("./routes/orderlyAccount");
-const portfolioRoute = require("./routes/portfolio");
-const ordersRoute = require("./routes/orders");
+function pickFirstValid(...values) {
+  for (const v of values) {
+    const n = toNumber(v);
+    if (n !== null && n > 0) return n;
+  }
+  return null;
+}
 
-// =====================
-// MOUNT CORE ROUTES
-// =====================
-app.use("/coin-icons", coinIconsRoute);
-app.use("/market-data", marketDataRoute);
-app.use("/ai-signals", aiSignalsRoute);
-app.use("/symbols", symbolsRoute);
+function normalizeSymbol(input) {
+  if (!input) return "";
 
-// =====================
-// MOUNT SAFE USER ROUTES
-// =====================
-app.use("/user-settings", userSettingsRoute);
-app.use("/watchlists", watchlistsRoute);
-app.use("/notifications", notificationsRoute);
+  let raw = String(input).trim().toUpperCase();
+  raw = raw.replace(/\s+/g, "");
+  raw = raw.replace(/\//g, "-");
+  raw = raw.replace(/_/g, "-");
 
-// =====================
-// MOUNT ORDERLY / TRADING ROUTES
-// =====================
-app.use("/orderly-account", orderlyAccountRoute);
-app.use("/portfolio", portfolioRoute);
-app.use("/orders", ordersRoute);
+  const KNOWN_QUOTES = ["USDT", "USDC", "USD", "PERP", "BUSD", "BTC", "ETH"];
 
-// =====================
-// SALES SUBMIT
-// =====================
-app.post("/sales/submit", (req, res) => {
+  const parts = raw.split("-").filter(Boolean);
+
+  if (parts.length === 1) return raw;
+
+  const filtered = parts.filter((p) => p !== "PERP");
+  const base = filtered.find((p) => !KNOWN_QUOTES.includes(p));
+
+  return base || filtered[0] || parts[0];
+}
+
+function resolveTradingPrice(source) {
+  if (!source) return null;
+
+  return pickFirstValid(
+    source.markPrice,
+    source.mark_price,
+
+    source.lastPrice,
+    source.last_price,
+    source.price,
+    source.tradePrice,
+    source.trade_price,
+    source.close,
+    source.closePrice,
+
+    source.indexPrice,
+    source.index_price
+  );
+}
+
+/* =========================
+   기본 라우트
+========================= */
+
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    service: "SolFort API",
+  });
+});
+
+/* =========================
+   MARKET DATA (핵심)
+========================= */
+
+app.get("/market-data", async (req, res) => {
+  try {
+    // TODO: 실제 거래소 API로 교체
+    const raw = [
+      {
+        symbol: "ETH-PERP",
+        markPrice: "3824.17",
+        lastPrice: "3823.90",
+        indexPrice: "3824.01",
+        marketCap: "999999999", // ❌ 절대 사용 금지
+      },
+      {
+        symbol: "BTC-PERP",
+        markPrice: "118220.2",
+        lastPrice: "118210.8",
+        indexPrice: "118215.5",
+        marketCap: "999999999",
+      },
+    ];
+
+    const data = raw.map((item) => ({
+      symbol: item.symbol,
+      normalizedSymbol: normalizeSymbol(item.symbol),
+
+      markPrice: item.markPrice,
+      lastPrice: item.lastPrice,
+      indexPrice: item.indexPrice,
+
+      // ✅ 핵심
+      liveTradingPrice: resolveTradingPrice(item),
+    }));
+
+    res.json({
+      success: true,
+      data,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      success: false,
+      message: "market data error",
+    });
+  }
+});
+
+/* =========================
+   SALES SUBMIT
+========================= */
+
+app.post("/sales/submit", async (req, res) => {
   try {
     const {
       customerName,
@@ -59,53 +138,40 @@ app.post("/sales/submit", (req, res) => {
       quantity,
       price,
       promotion,
-      sofAmount
+      sofAmount,
     } = req.body;
 
-    const payload = {
-      name: customerName || "",
-      wallet: walletAddress || "",
-      sales: Number(sales || 0),
-      quantity: Number(quantity || 0),
-      price: Number(price || 0),
-      promotion: Number(promotion || 0),
-      sofAmount: Number(sofAmount || 0),
-      submittedAt: new Date().toISOString()
-    };
+    if (!customerName || !walletAddress) {
+      return res.status(400).json({
+        success: false,
+        message: "필수값 누락",
+      });
+    }
 
-    console.log("SALES SUBMIT:", payload);
-
-    return res.json({
-      ok: true,
-      message: "Sales submission received",
-      data: payload
+    res.json({
+      success: true,
+      data: {
+        customerName,
+        walletAddress,
+        sales,
+        quantity,
+        price,
+        promotion,
+        sofAmount,
+        createdAt: new Date().toISOString(),
+      },
     });
-  } catch (error) {
-    console.error("SALES SUBMIT ERROR:", error.message);
-    return res.status(500).json({
-      ok: false,
-      error: error.message
+  } catch (err) {
+    res.status(500).json({
+      success: false,
     });
   }
 });
 
-// =====================
-// ROOT TEST
-// =====================
-app.get("/", (req, res) => {
-  res.send("SolFort API running 🚀");
-});
-
-app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    service: "solfort-api",
-    uptime: process.uptime()
-  });
-});
+/* ========================= */
 
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🚀 SolFort Server Running on ${PORT}`);
 });
