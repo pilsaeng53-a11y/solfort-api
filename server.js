@@ -1,4 +1,4 @@
-// server.js (FULL VERSION - SOLFORT PRE-DB MARKET ENGINE + PREDICTION AGGREGATOR)
+// server.js (FULL VERSION - SOLFORT PRE-DB MARKET ENGINE + SAFE PREDICTION AGGREGATOR)
 
 const express = require("express");
 const cors = require("cors");
@@ -40,15 +40,29 @@ const STREAM_INTERVAL_MS = 1500;
 
 /* =========================
    PREDICTION AGGREGATOR CONFIG
+   OOM SAFE
 ========================= */
 
-const PREDICTION_REFRESH_MS = 60 * 1000;
+const PREDICTION_REFRESH_MS = 3 * 60 * 1000; // 3분
+const MAX_POLY_MARKETS = 350;
+const MAX_KALSHI_EVENTS = 220;
+const MAX_TOTAL_PREDICTION_MARKETS = 500;
+const FETCH_TIMEOUT_MS = 15000;
 
 const predictionCache = {
   updatedAt: null,
   markets: [],
-  categories: []
+  categories: [],
+  stats: {
+    lastRefreshStatus: "idle",
+    lastError: null,
+    polymarketCount: 0,
+    kalshiCount: 0,
+    totalMerged: 0
+  }
 };
+
+let isPredictionRefreshing = false;
 
 /* =========================
    UTILS
@@ -143,21 +157,23 @@ function normalizePredictionCategory(input) {
     trending: "Trending",
     elections: "Elections",
     politics: "Politics",
+    political: "Politics",
     sports: "Sports",
+    sport: "Sports",
     culture: "Culture",
     crypto: "Crypto",
     climate: "Climate",
     economy: "Economics",
     economics: "Economics",
     mentions: "Global",
+    global: "Global",
     companies: "Companies",
     company: "Companies",
     financials: "Financials",
     finance: "Financials",
     tech: "Tech & Science",
     technology: "Tech & Science",
-    science: "Tech & Science",
-    global: "Global"
+    science: "Tech & Science"
   };
 
   return map[raw] || titleCase(raw || "Global");
@@ -168,14 +184,14 @@ function buildPredictionCategories(markets) {
   for (const market of markets) {
     if (market.category) set.add(market.category);
   }
-  return Array.from(set);
+  return Array.from(set).sort((a, b) => a.localeCompare(b));
 }
 
 function rankPredictionMarkets(markets) {
   return markets.map((m) => {
     const volume = safeNum(m.volume, 0);
     const highestPayout = Math.max(
-      ...((m.outcomes || []).map((o) => safeNum(o.payout, 0)).length
+      ...((m.outcomes || []).length
         ? m.outcomes.map((o) => safeNum(o.payout, 0))
         : [0])
     );
@@ -188,6 +204,90 @@ function rankPredictionMarkets(markets) {
     };
   });
 }
+
+function sanitizePredictionMarkets(markets) {
+  return markets
+    .filter((m) => m && m.question && Array.isArray(m.outcomes) && m.outcomes.length > 0)
+    .map((m) => ({
+      ...m,
+      externalId: String(m.externalId),
+      slug: m.slug || "",
+      question: String(m.question).trim(),
+      category: normalizePredictionCategory(m.category),
+      subcategory: m.subcategory ? String(m.subcategory).trim() : null,
+      volume: safeNum(m.volume, 0),
+      outcomes: m.outcomes
+        .filter((o) => o && o.name)
+        .slice(0, 12)
+        .map((o) => ({
+          name: String(o.name).trim(),
+          probability: safeNum(o.probability, 0),
+          payout: o.payout != null ? safeNum(o.payout, 0) : payoutFromProb(safeNum(o.probability, 0))
+        }))
+    }));
+}
+
+function dedupePredictionMarkets(markets) {
+  const seen = new Set();
+  const result = [];
+
+  for (const market of markets) {
+    const key = `${market.source}:${market.externalId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(market);
+  }
+
+  return result;
+}
+
+function sortPredictionMarkets(rows, sort = "popular") {
+  const next = [...rows];
+
+  if (sort === "highest-odds") {
+    next.sort((a, b) => safeNum(b.highestPayout, 0) - safeNum(a.highestPayout, 0));
+  } else if (sort === "popular") {
+    next.sort((a, b) => safeNum(b.popularityScore, 0) - safeNum(a.popularityScore, 0));
+  } else if (sort === "trending") {
+    next.sort((a, b) => safeNum(b.trendingScore, 0) - safeNum(a.trendingScore, 0));
+  } else if (sort === "ending-soon") {
+    next.sort((a, b) => {
+      const aTime = a.endsAt ? new Date(a.endsAt).getTime() : Number.MAX_SAFE_INTEGER;
+      const bTime = b.endsAt ? new Date(b.endsAt).getTime() : Number.MAX_SAFE_INTEGER;
+      return aTime - bTime;
+    });
+  } else {
+    next.sort((a, b) => safeNum(b.popularityScore, 0) - safeNum(a.popularityScore, 0));
+  }
+
+  return next;
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "SolFort/1.0"
+      }
+    });
+
+    if (!res.ok) {
+      throw new Error(`Fetch failed ${res.status}: ${url}`);
+    }
+
+    return res.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/* =========================
+   QUOTE / CANDLE ENGINE
+========================= */
 
 function generateQuote(symbol) {
   const config = SYMBOL_CONFIG[symbol];
@@ -309,44 +409,30 @@ function buildSymbolList() {
   });
 }
 
-function getHealthChecks() {
-  return {
-    root: true,
-    marketData: true,
-    quotes: true,
-    candles: true,
-    newsService: true,
-    salesSubmit: true,
-    websocket: true,
-    predictionAggregator: true
-  };
-}
-
 /* =========================
-   PREDICTION AGGREGATOR
+   PREDICTION FETCHERS
 ========================= */
 
 async function fetchAllPolymarketMarkets() {
   let offset = 0;
-  const pageSize = 200;
+  const pageSize = 100;
   let allRows = [];
   let keepGoing = true;
 
   while (keepGoing) {
     const url = `https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=${pageSize}&offset=${offset}`;
-    const res = await fetch(url);
-
-    if (!res.ok) {
-      throw new Error(`Polymarket fetch failed: ${res.status}`);
-    }
-
-    const rows = await res.json();
+    const rows = await fetchJsonWithTimeout(url);
 
     if (!Array.isArray(rows) || rows.length === 0) {
       break;
     }
 
     allRows = allRows.concat(rows);
+
+    if (allRows.length >= MAX_POLY_MARKETS) {
+      allRows = allRows.slice(0, MAX_POLY_MARKETS);
+      break;
+    }
 
     if (rows.length < pageSize) {
       keepGoing = false;
@@ -401,19 +487,15 @@ async function fetchAllPolymarketMarkets() {
 async function fetchKalshiEventsPage(cursor = "") {
   const base = "https://api.elections.kalshi.com/trade-api/v2/events";
   const qs = new URLSearchParams({
-    limit: "200",
+    limit: "100",
     with_nested_markets: "true"
   });
 
-  if (cursor) qs.set("cursor", cursor);
-
-  const res = await fetch(`${base}?${qs.toString()}`);
-
-  if (!res.ok) {
-    throw new Error(`Kalshi fetch failed: ${res.status}`);
+  if (cursor) {
+    qs.set("cursor", cursor);
   }
 
-  return res.json();
+  return fetchJsonWithTimeout(`${base}?${qs.toString()}`);
 }
 
 async function fetchAllKalshiEventsAndMarkets() {
@@ -425,10 +507,19 @@ async function fetchAllKalshiEventsAndMarkets() {
     const json = await fetchKalshiEventsPage(cursor);
     const events = json.events || json.data?.events || [];
 
+    if (!Array.isArray(events) || events.length === 0) {
+      break;
+    }
+
     allEvents = allEvents.concat(events);
 
+    if (allEvents.length >= MAX_KALSHI_EVENTS) {
+      allEvents = allEvents.slice(0, MAX_KALSHI_EVENTS);
+      break;
+    }
+
     const nextCursor = json.cursor || json.data?.cursor || "";
-    if (!nextCursor || events.length === 0) {
+    if (!nextCursor) {
       keepGoing = false;
     } else {
       cursor = nextCursor;
@@ -477,6 +568,14 @@ async function fetchAllKalshiEventsAndMarkets() {
         endsAt: event.close_time || event.expiration_date || null,
         image: null
       });
+
+      if (markets.length >= MAX_KALSHI_EVENTS) {
+        break;
+      }
+    }
+
+    if (markets.length >= MAX_KALSHI_EVENTS) {
+      break;
     }
   }
 
@@ -484,49 +583,70 @@ async function fetchAllKalshiEventsAndMarkets() {
 }
 
 async function refreshPredictionMarkets() {
-  const [poly, kalshi] = await Promise.allSettled([
-    fetchAllPolymarketMarkets(),
-    fetchAllKalshiEventsAndMarkets()
-  ]);
+  if (isPredictionRefreshing) {
+    console.log("[prediction] refresh skipped (already running)");
+    return;
+  }
 
-  const merged = [
-    ...(poly.status === "fulfilled" ? poly.value : []),
-    ...(kalshi.status === "fulfilled" ? kalshi.value : [])
-  ];
+  isPredictionRefreshing = true;
+  predictionCache.stats.lastRefreshStatus = "refreshing";
+  predictionCache.stats.lastError = null;
 
-  const ranked = rankPredictionMarkets(merged);
+  try {
+    const [poly, kalshi] = await Promise.allSettled([
+      fetchAllPolymarketMarkets(),
+      fetchAllKalshiEventsAndMarkets()
+    ]);
 
-  predictionCache.markets = ranked;
-  predictionCache.categories = buildPredictionCategories(ranked);
-  predictionCache.updatedAt = new Date().toISOString();
+    const polyMarkets = poly.status === "fulfilled" ? poly.value : [];
+    const kalshiMarkets = kalshi.status === "fulfilled" ? kalshi.value : [];
+
+    let merged = [...polyMarkets, ...kalshiMarkets];
+    merged = sanitizePredictionMarkets(merged);
+    merged = dedupePredictionMarkets(merged);
+    merged = rankPredictionMarkets(merged);
+    merged = merged
+      .sort((a, b) => safeNum(b.popularityScore, 0) - safeNum(a.popularityScore, 0))
+      .slice(0, MAX_TOTAL_PREDICTION_MARKETS);
+
+    predictionCache.markets = merged;
+    predictionCache.categories = buildPredictionCategories(merged);
+    predictionCache.updatedAt = new Date().toISOString();
+    predictionCache.stats = {
+      lastRefreshStatus: "ok",
+      lastError: null,
+      polymarketCount: polyMarkets.length,
+      kalshiCount: kalshiMarkets.length,
+      totalMerged: merged.length
+    };
+
+    console.log(
+      `[prediction] updated=${predictionCache.updatedAt} total=${merged.length} poly=${polyMarkets.length} kalshi=${kalshiMarkets.length}`
+    );
+  } catch (e) {
+    predictionCache.stats.lastRefreshStatus = "failed";
+    predictionCache.stats.lastError = String(e?.message || e);
+    console.error("Prediction refresh failed:", e);
+  } finally {
+    isPredictionRefreshing = false;
+  }
 }
 
-function filterPredictionMarkets({ category, source, sort }) {
-  let rows = [...predictionCache.markets];
+/* =========================
+   HEALTH
+========================= */
 
-  if (category) {
-    rows = rows.filter(
-      (m) => String(m.category).toLowerCase() === String(category).toLowerCase()
-    );
-  }
-
-  if (source) {
-    rows = rows.filter(
-      (m) => String(m.source).toLowerCase() === String(source).toLowerCase()
-    );
-  }
-
-  if (sort === "highest-odds") {
-    rows.sort((a, b) => safeNum(b.highestPayout, 0) - safeNum(a.highestPayout, 0));
-  } else if (sort === "popular") {
-    rows.sort((a, b) => safeNum(b.popularityScore, 0) - safeNum(a.popularityScore, 0));
-  } else if (sort === "trending") {
-    rows.sort((a, b) => safeNum(b.trendingScore, 0) - safeNum(a.trendingScore, 0));
-  } else {
-    rows.sort((a, b) => safeNum(b.popularityScore, 0) - safeNum(a.popularityScore, 0));
-  }
-
-  return rows;
+function getHealthChecks() {
+  return {
+    root: true,
+    marketData: true,
+    quotes: true,
+    candles: true,
+    newsService: true,
+    salesSubmit: true,
+    websocket: true,
+    predictionAggregator: true
+  };
 }
 
 /* =========================
@@ -745,7 +865,7 @@ app.post("/sales/submit", (req, res) => {
 });
 
 /* =========================
-   PREDICTION MARKET ROUTES
+   PREDICTION ROUTES
 ========================= */
 
 app.get("/prediction/health", (req, res) => {
@@ -753,7 +873,8 @@ app.get("/prediction/health", (req, res) => {
     success: true,
     updatedAt: predictionCache.updatedAt,
     totalMarkets: predictionCache.markets.length,
-    categories: predictionCache.categories
+    categories: predictionCache.categories,
+    stats: predictionCache.stats
   });
 });
 
@@ -761,6 +882,7 @@ app.get("/prediction/categories", (req, res) => {
   res.json({
     success: true,
     updatedAt: predictionCache.updatedAt,
+    count: predictionCache.categories.length,
     data: predictionCache.categories
   });
 });
@@ -790,6 +912,7 @@ app.get("/prediction/top", (req, res) => {
   const highestOdds = filterPredictionMarkets({ sort: "highest-odds" }).slice(0, 50);
   const mostPopular = filterPredictionMarkets({ sort: "popular" }).slice(0, 50);
   const trending = filterPredictionMarkets({ sort: "trending" }).slice(0, 50);
+  const endingSoon = filterPredictionMarkets({ sort: "ending-soon" }).slice(0, 50);
 
   res.json({
     success: true,
@@ -797,7 +920,8 @@ app.get("/prediction/top", (req, res) => {
     data: {
       highestOdds,
       mostPopular,
-      trending
+      trending,
+      endingSoon
     }
   });
 });
