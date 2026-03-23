@@ -1,4 +1,5 @@
-// server.js (FULL VERSION - SOLFORT PRE-DB MARKET ENGINE + SAFE PREDICTION AGGREGATOR)
+// server.js
+// FULL VERSION - SOLFORT PRE-DB MARKET ENGINE + SAFE PREDICTION AGGREGATOR + CUSTOM CRYPTO MARKETS
 
 const express = require("express");
 const cors = require("cors");
@@ -14,6 +15,24 @@ app.use(cors());
 app.use(express.json());
 
 const SERVER_STARTED_AT = new Date().toISOString();
+
+/* =========================
+   CORE CONFIG
+========================= */
+
+const STREAM_INTERVAL_MS = 1500;
+const FETCH_TIMEOUT_MS = 15000;
+
+/* =========================
+   PREDICTION CONFIG
+========================= */
+
+const PREDICTION_REFRESH_MS = 3 * 60 * 1000; // 3분
+const MAX_POLY_MARKETS = 350;
+const MAX_KALSHI_EVENTS = 220;
+const MAX_TOTAL_PREDICTION_MARKETS = 500;
+
+const BET_LOCK_SECONDS = 20;
 
 /* =========================
    SYMBOL CONFIG
@@ -36,18 +55,18 @@ const SYMBOL_CONFIG = {
   SP500: { category: "INDICES", displayName: "S&P 500", basePrice: 5142.7, spread: 0.8, digits: 1 }
 };
 
-const STREAM_INTERVAL_MS = 1500;
+const CUSTOM_CRYPTO_SYMBOLS = ["BTC", "ETH", "SOL", "XRP"];
+const CUSTOM_CRYPTO_TIMEFRAMES = [
+  { key: "5m", label: "5 Minutes", minutes: 5 },
+  { key: "15m", label: "15 Minutes", minutes: 15 },
+  { key: "1h", label: "1 Hour", minutes: 60 },
+  { key: "4h", label: "4 Hours", minutes: 240 },
+  { key: "1d", label: "1 Day", minutes: 1440 }
+];
 
 /* =========================
-   PREDICTION AGGREGATOR CONFIG
-   OOM SAFE
+   CACHE
 ========================= */
-
-const PREDICTION_REFRESH_MS = 3 * 60 * 1000; // 3분
-const MAX_POLY_MARKETS = 350;
-const MAX_KALSHI_EVENTS = 220;
-const MAX_TOTAL_PREDICTION_MARKETS = 500;
-const FETCH_TIMEOUT_MS = 15000;
 
 const predictionCache = {
   updatedAt: null,
@@ -58,6 +77,7 @@ const predictionCache = {
     lastError: null,
     polymarketCount: 0,
     kalshiCount: 0,
+    customCount: 0,
     totalMerged: 0
   }
 };
@@ -65,13 +85,59 @@ const predictionCache = {
 let isPredictionRefreshing = false;
 
 /* =========================
-   UTILS
+   GENERIC UTILS
 ========================= */
 
 function toNumber(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
+
+function safeNum(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function roundPrice(value, digits = 2) {
+  return Number(Number(value).toFixed(digits));
+}
+
+function titleCase(input) {
+  return String(input || "")
+    .replace(/[-_]/g, " ")
+    .replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+function pseudoRandom(seed) {
+  const x = Math.sin(seed) * 10000;
+  return x - Math.floor(x);
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "SolFort/1.0"
+      }
+    });
+
+    if (!res.ok) {
+      throw new Error(`Fetch failed ${res.status}: ${url}`);
+    }
+
+    return res.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/* =========================
+   SYMBOL HELPERS
+========================= */
 
 function normalizeSymbol(input) {
   if (!input) return "";
@@ -120,34 +186,144 @@ function ensureSymbol(input) {
   return symbol;
 }
 
-function roundPrice(value, digits = 2) {
-  return Number(Number(value).toFixed(digits));
-}
-
 function getDigits(symbol) {
   return SYMBOL_CONFIG[symbol]?.digits ?? 2;
 }
 
-function pseudoRandom(seed) {
-  const x = Math.sin(seed) * 10000;
-  return x - Math.floor(x);
+/* =========================
+   QUOTE / CANDLE ENGINE
+========================= */
+
+function generateQuote(symbol) {
+  const config = SYMBOL_CONFIG[symbol];
+  const now = Date.now();
+  const timeFactor = now / 1000;
+
+  const noise = pseudoRandom(timeFactor + config.basePrice) - 0.5;
+  const trend = Math.sin(timeFactor / 60) * 0.001;
+
+  const volatilityFactor =
+    symbol === "BTC" || symbol === "ETH" || symbol === "SOL" || symbol === "XRP"
+      ? config.basePrice * 0.0025
+      : config.basePrice * 0.00035;
+
+  const move = noise * volatilityFactor + trend * config.basePrice;
+  const mid = config.basePrice + move;
+
+  const bid = roundPrice(mid - config.spread / 2, getDigits(symbol));
+  const ask = roundPrice(mid + config.spread / 2, getDigits(symbol));
+  const last = roundPrice((bid + ask) / 2, getDigits(symbol));
+  const dailyOpen = config.basePrice;
+  const change = last - dailyOpen;
+  const changePercent = Number(((change / dailyOpen) * 100).toFixed(2));
+
+  return {
+    symbol,
+    displayName: config.displayName,
+    category: config.category,
+    bid,
+    ask,
+    last,
+    mid: last,
+    spread: roundPrice(ask - bid, getDigits(symbol)),
+    change,
+    changePercent,
+    tradingViewSymbol: toTradingViewSymbol(symbol),
+    updatedAt: new Date().toISOString()
+  };
 }
 
-function safeNum(v, fallback = 0) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
+function intervalToMs(interval) {
+  const map = {
+    "1m": 60 * 1000,
+    "5m": 5 * 60 * 1000,
+    "15m": 15 * 60 * 1000,
+    "30m": 30 * 60 * 1000,
+    "1h": 60 * 60 * 1000,
+    "4h": 4 * 60 * 60 * 1000,
+    "1d": 24 * 60 * 60 * 1000
+  };
+
+  return map[interval] || map["15m"];
 }
+
+function generateCandles(symbol, interval = "15m", limit = 200) {
+  const config = SYMBOL_CONFIG[symbol];
+  const intervalMs = intervalToMs(interval);
+  const digits = getDigits(symbol);
+  const now = Date.now();
+
+  const candles = [];
+  let previousClose = config.basePrice;
+
+  for (let i = limit - 1; i >= 0; i -= 1) {
+    const time = now - i * intervalMs;
+    const factorA = Math.sin(time / 300000);
+    const factorB = Math.cos(time / 900000);
+
+    const volatility =
+      symbol === "BTC" || symbol === "ETH" || symbol === "SOL" || symbol === "XRP"
+        ? config.basePrice * 0.004
+        : config.basePrice * 0.0008;
+
+    const drift = (factorA + factorB) * volatility * 0.25;
+    const open = previousClose;
+    const close = open + drift + (pseudoRandom(time) - 0.5) * volatility * 0.35;
+
+    const highBase = Math.max(open, close);
+    const lowBase = Math.min(open, close);
+
+    const high = highBase + pseudoRandom(time + 1) * volatility * 0.2;
+    const low = lowBase - pseudoRandom(time + 2) * volatility * 0.2;
+
+    const volume =
+      symbol === "BTC" || symbol === "ETH" || symbol === "SOL" || symbol === "XRP"
+        ? Math.round(1000 + pseudoRandom(time + 3) * 9000)
+        : Math.round(50 + pseudoRandom(time + 3) * 350);
+
+    const candle = {
+      time: new Date(time).toISOString(),
+      timestamp: time,
+      open: roundPrice(open, digits),
+      high: roundPrice(high, digits),
+      low: roundPrice(low, digits),
+      close: roundPrice(close, digits),
+      volume
+    };
+
+    candles.push(candle);
+    previousClose = candle.close;
+  }
+
+  return candles;
+}
+
+function buildSymbolList() {
+  return Object.entries(SYMBOL_CONFIG).map(([symbol, config]) => {
+    const quote = generateQuote(symbol);
+
+    return {
+      symbol,
+      displayName: config.displayName,
+      category: config.category,
+      tradingViewSymbol: toTradingViewSymbol(symbol),
+      last: quote.last,
+      bid: quote.bid,
+      ask: quote.ask,
+      spread: quote.spread,
+      changePercent: quote.changePercent
+    };
+  });
+}
+
+/* =========================
+   PREDICTION HELPERS
+========================= */
 
 function payoutFromProb(prob) {
   const p = safeNum(prob, 0);
   if (p <= 0) return null;
   return Number((1 / p).toFixed(2));
-}
-
-function titleCase(s) {
-  return String(s || "")
-    .replace(/[-_]/g, " ")
-    .replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
 function normalizePredictionCategory(input) {
@@ -263,172 +439,14 @@ function sortPredictionMarkets(rows, sort = "popular") {
   return next;
 }
 
-async function fetchJsonWithTimeout(url, timeoutMs = FETCH_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "SolFort/1.0"
-      }
-    });
-
-    if (!res.ok) {
-      throw new Error(`Fetch failed ${res.status}: ${url}`);
-    }
-
-    return res.json();
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 /* =========================
-   QUOTE / CANDLE ENGINE
+   CUSTOM SOLFORT CRYPTO MARKETS
 ========================= */
-
-function generateQuote(symbol) {
-  const config = SYMBOL_CONFIG[symbol];
-  const now = Date.now();
-  const timeFactor = now / 1000;
-
-  const noise = (pseudoRandom(timeFactor + config.basePrice) - 0.5);
-  const trend = Math.sin(timeFactor / 60) * 0.001;
-  const volatilityFactor =
-    symbol === "BTC" || symbol === "ETH" || symbol === "SOL" || symbol === "XRP"
-      ? config.basePrice * 0.0025
-      : config.basePrice * 0.00035;
-
-  const move = (noise * volatilityFactor) + (trend * config.basePrice);
-  const mid = config.basePrice + move;
-
-  const bid = roundPrice(mid - config.spread / 2, getDigits(symbol));
-  const ask = roundPrice(mid + config.spread / 2, getDigits(symbol));
-  const last = roundPrice((bid + ask) / 2, getDigits(symbol));
-  const dailyOpen = config.basePrice;
-  const change = last - dailyOpen;
-  const changePercent = Number(((change / dailyOpen) * 100).toFixed(2));
-
-  return {
-    symbol,
-    displayName: config.displayName,
-    category: config.category,
-    bid,
-    ask,
-    last,
-    mid: last,
-    spread: roundPrice(ask - bid, getDigits(symbol)),
-    change,
-    changePercent,
-    tradingViewSymbol: toTradingViewSymbol(symbol),
-    updatedAt: new Date().toISOString()
-  };
-}
-
-function intervalToMs(interval) {
-  const map = {
-    "1m": 60 * 1000,
-    "5m": 5 * 60 * 1000,
-    "15m": 15 * 60 * 1000,
-    "30m": 30 * 60 * 1000,
-    "1h": 60 * 60 * 1000,
-    "4h": 4 * 60 * 60 * 1000,
-    "1d": 24 * 60 * 60 * 1000
-  };
-
-  return map[interval] || map["15m"];
-}
-
-function generateCandles(symbol, interval = "15m", limit = 200) {
-  const config = SYMBOL_CONFIG[symbol];
-  const intervalMs = intervalToMs(interval);
-  const digits = getDigits(symbol);
-  const now = Date.now();
-
-  const candles = [];
-  let previousClose = config.basePrice;
-
-  for (let i = limit - 1; i >= 0; i -= 1) {
-    const time = now - (i * intervalMs);
-    const factorA = Math.sin(time / 300000);
-    const factorB = Math.cos(time / 900000);
-    const volatility =
-      symbol === "BTC" || symbol === "ETH" || symbol === "SOL" || symbol === "XRP"
-        ? config.basePrice * 0.004
-        : config.basePrice * 0.0008;
-
-    const drift = (factorA + factorB) * volatility * 0.25;
-    const open = previousClose;
-    const close = open + drift + ((pseudoRandom(time) - 0.5) * volatility * 0.35);
-
-    const highBase = Math.max(open, close);
-    const lowBase = Math.min(open, close);
-
-    const high = highBase + (pseudoRandom(time + 1) * volatility * 0.2);
-    const low = lowBase - (pseudoRandom(time + 2) * volatility * 0.2);
-
-    const volume =
-      symbol === "BTC" || symbol === "ETH" || symbol === "SOL" || symbol === "XRP"
-        ? Math.round(1000 + pseudoRandom(time + 3) * 9000)
-        : Math.round(50 + pseudoRandom(time + 3) * 350);
-
-    const candle = {
-      time: new Date(time).toISOString(),
-      timestamp: time,
-      open: roundPrice(open, digits),
-      high: roundPrice(high, digits),
-      low: roundPrice(low, digits),
-      close: roundPrice(close, digits),
-      volume
-    };
-
-    candles.push(candle);
-    previousClose = candle.close;
-  }
-
-  return candles;
-}
-
-function buildSymbolList() {
-  return Object.entries(SYMBOL_CONFIG).map(([symbol, config]) => {
-    const quote = generateQuote(symbol);
-
-    return {
-      symbol,
-      displayName: config.displayName,
-      category: config.category,
-      tradingViewSymbol: toTradingViewSymbol(symbol),
-      last: quote.last,
-      bid: quote.bid,
-      ask: quote.ask,
-      spread: quote.spread,
-      changePercent: quote.changePercent
-    };
-  });
-}
-
-/* =========================
-   SOLFORT CUSTOM CRYPTO PREDICTION MARKETS
-========================= */
-
-const CUSTOM_CRYPTO_SYMBOLS = ["BTC", "ETH", "SOL", "XRP"];
-const CUSTOM_CRYPTO_TIMEFRAMES = [
-  { key: "5m", label: "5 Minutes", minutes: 5 },
-  { key: "15m", label: "15 Minutes", minutes: 15 },
-  { key: "1h", label: "1 Hour", minutes: 60 },
-  { key: "4h", label: "4 Hours", minutes: 240 },
-  { key: "1d", label: "1 Day", minutes: 1440 }
-];
-
-const BET_LOCK_SECONDS = 20;
 
 function getNextResolutionDate(minutes) {
   const now = new Date();
   const ms = minutes * 60 * 1000;
-  const next = new Date(Math.ceil(now.getTime() / ms) * ms);
-  return next;
+  return new Date(Math.ceil(now.getTime() / ms) * ms);
 }
 
 function buildCustomOutcome(probYes = 0.5) {
@@ -449,11 +467,20 @@ function buildCustomOutcome(probYes = 0.5) {
   ];
 }
 
+function getCustomSubcategoryByTimeframe(timeframeKey) {
+  if (timeframeKey === "5m" || timeframeKey === "15m") return "Ultra Short";
+  if (timeframeKey === "1h") return "Hourly";
+  if (timeframeKey === "4h") return "4H";
+  return "Daily";
+}
+
 function createBinaryUpDownMarket(symbol, timeframe) {
+  const quote = generateQuote(symbol);
   const resolutionDate = getNextResolutionDate(timeframe.minutes);
   const lockDate = new Date(resolutionDate.getTime() - BET_LOCK_SECONDS * 1000);
 
-  const baseProb = 0.5;
+  const driftSeed = safeNum(quote.changePercent, 0);
+  const baseProb = 0.5 + Math.max(Math.min(driftSeed / 100, 0.12), -0.12);
 
   return {
     source: "solfort",
@@ -461,27 +488,9 @@ function createBinaryUpDownMarket(symbol, timeframe) {
     slug: `${symbol.toLowerCase()}-${timeframe.key}-updown`,
     question: `Will ${symbol} close ${timeframe.label} higher than now?`,
     category: "Crypto",
-    subcategory:
-      timeframe.key === "5m" || timeframe.key === "15m"
-        ? "Ultra Short"
-        : timeframe.key === "1h"
-        ? "Hourly"
-        : timeframe.key === "4h"
-        ? "4H"
-        : "Daily",
+    subcategory: getCustomSubcategoryByTimeframe(timeframe.key),
     marketType: "binary",
-    outcomes: [
-      {
-        name: "Yes",
-        probability: baseProb,
-        payout: payoutFromProb(baseProb)
-      },
-      {
-        name: "No",
-        probability: 1 - baseProb,
-        payout: payoutFromProb(1 - baseProb)
-      }
-    ],
+    outcomes: buildCustomOutcome(baseProb),
     volume: Math.round(5000 + Math.random() * 50000),
     endsAt: resolutionDate.toISOString(),
     lockAt: lockDate.toISOString(),
@@ -518,7 +527,7 @@ function createAboveBelowMarket(symbol, timeframe) {
       : 1;
 
   const target = roundPrice(current + step, digits);
-  const baseProb = 0.5;
+  const baseProb = 0.48 + Math.random() * 0.08;
 
   return {
     source: "solfort",
@@ -526,27 +535,9 @@ function createAboveBelowMarket(symbol, timeframe) {
     slug: `${symbol.toLowerCase()}-${timeframe.key}-above-${String(target).replace(".", "-")}`,
     question: `Will ${symbol} settle above ${target} in ${timeframe.label}?`,
     category: "Crypto",
-    subcategory:
-      timeframe.key === "5m" || timeframe.key === "15m"
-        ? "Ultra Short"
-        : timeframe.key === "1h"
-        ? "Hourly"
-        : timeframe.key === "4h"
-        ? "4H"
-        : "Daily",
+    subcategory: getCustomSubcategoryByTimeframe(timeframe.key),
     marketType: "binary",
-    outcomes: [
-      {
-        name: "Yes",
-        probability: baseProb,
-        payout: payoutFromProb(baseProb)
-      },
-      {
-        name: "No",
-        probability: 1 - baseProb,
-        payout: payoutFromProb(1 - baseProb)
-      }
-    ],
+    outcomes: buildCustomOutcome(baseProb),
     volume: Math.round(3000 + Math.random() * 30000),
     endsAt: resolutionDate.toISOString(),
     lockAt: lockDate.toISOString(),
@@ -564,53 +555,6 @@ function createAboveBelowMarket(symbol, timeframe) {
   };
 }
 
-function createAboveBelowMarket(symbol, timeframe) {
-  const quote = generateQuote(symbol);
-  const resolutionDate = getNextResolutionDate(timeframe.minutes);
-  const lockDate = new Date(resolutionDate.getTime() - BET_LOCK_SECONDS * 1000);
-
-  const current = safeNum(quote.last, 0);
-  const digits = getDigits(symbol);
-  const step =
-    symbol === "BTC" ? 250 :
-    symbol === "ETH" ? 10 :
-    symbol === "SOL" ? 1 :
-    symbol === "XRP" ? 0.01 : 1;
-
-  const target = roundPrice(current + step, digits);
-  const baseProb = 0.48 + Math.random() * 0.08;
-
-  return {
-    source: "solfort",
-    externalId: solfort-${symbol.toLowerCase()}-${timeframe.key}-above-${String(target).replace(".", "_")},
-    slug: ${symbol.toLowerCase()}-${timeframe.key}-above-${String(target).replace(".", "-")},
-    question: Will ${symbol} settle above ${target} in ${timeframe.label}?,
-    category: "Crypto",
-    subcategory: timeframe.key === "5m" || timeframe.key === "15m"
-      ? "Ultra Short"
-      : timeframe.key === "1h"
-      ? "Hourly"
-      : timeframe.key === "4h"
-      ? "4H"
-      : "Daily",
-    marketType: "binary",
-    outcomes: buildCustomOutcome(baseProb),
-    volume: Math.round(3000 + Math.random() * 30000),
-    endsAt: resolutionDate.toISOString(),
-    lockAt: lockDate.toISOString(),
-    lockSeconds: BET_LOCK_SECONDS,
-    status: new Date() >= lockDate ? "locked" : "open",
-    image: null,
-    metadata: {
-      symbol,
-      timeframe: timeframe.key,
-      resolutionType: "above-below",
-      targetPrice: target,
-      referenceSymbol: ${symbol}USDT,
-      lockRule: Betting closes ${BET_LOCK_SECONDS} seconds before resolution
-    }
-  };
-}
 function generateCustomCryptoPredictionMarkets() {
   const rows = [];
 
@@ -833,12 +777,12 @@ async function refreshPredictionMarkets() {
       lastError: null,
       polymarketCount: polyMarkets.length,
       kalshiCount: kalshiMarkets.length,
-      totalMerged: merged.length,
-      customCount: customMarkets.length
+      customCount: customMarkets.length,
+      totalMerged: merged.length
     };
 
     console.log(
-      [prediction] updated=${predictionCache.updatedAt} total=${merged.length} poly=${polyMarkets.length} kalshi=${kalshiMarkets.length} custom=${customMarkets.length}
+      `[prediction] updated=${predictionCache.updatedAt} total=${merged.length} poly=${polyMarkets.length} kalshi=${kalshiMarkets.length} custom=${customMarkets.length}`
     );
   } catch (e) {
     predictionCache.stats.lastRefreshStatus = "failed";
@@ -848,7 +792,6 @@ async function refreshPredictionMarkets() {
     isPredictionRefreshing = false;
   }
 }
-
 
 /* =========================
    HEALTH
@@ -1113,10 +1056,14 @@ app.get("/prediction/markets", (req, res) => {
     limit = "100"
   } = req.query;
 
-  const rows = filterPredictionMarkets({ category, source, sort }).slice(
-    0,
-    Math.max(1, Math.min(Number(limit) || 100, 1000))
-  );
+  const rows = sortPredictionMarkets(
+    predictionCache.markets.filter((market) => {
+      const categoryOk = !category || String(market.category).toLowerCase() === String(category).toLowerCase();
+      const sourceOk = !source || String(market.source).toLowerCase() === String(source).toLowerCase();
+      return categoryOk && sourceOk;
+    }),
+    sort
+  ).slice(0, Math.max(1, Math.min(Number(limit) || 100, 1000)));
 
   res.json({
     success: true,
@@ -1127,10 +1074,10 @@ app.get("/prediction/markets", (req, res) => {
 });
 
 app.get("/prediction/top", (req, res) => {
-  const highestOdds = filterPredictionMarkets({ sort: "highest-odds" }).slice(0, 50);
-  const mostPopular = filterPredictionMarkets({ sort: "popular" }).slice(0, 50);
-  const trending = filterPredictionMarkets({ sort: "trending" }).slice(0, 50);
-  const endingSoon = filterPredictionMarkets({ sort: "ending-soon" }).slice(0, 50);
+  const highestOdds = sortPredictionMarkets(predictionCache.markets, "highest-odds").slice(0, 50);
+  const mostPopular = sortPredictionMarkets(predictionCache.markets, "popular").slice(0, 50);
+  const trending = sortPredictionMarkets(predictionCache.markets, "trending").slice(0, 50);
+  const endingSoon = sortPredictionMarkets(predictionCache.markets, "ending-soon").slice(0, 50);
 
   res.json({
     success: true,
