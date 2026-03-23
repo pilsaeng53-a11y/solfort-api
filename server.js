@@ -1,10 +1,14 @@
-// server.js (FULL VERSION - SOLFORT PRE-DB UPGRADE)
+// server.js (FULL VERSION - SOLFORT PRE-DB MARKET ENGINE)
 
 const express = require("express");
 const cors = require("cors");
+const http = require("http");
+const { WebSocketServer } = require("ws");
 const { getNewsBySymbol } = require("./services/newsService");
 
 const app = express();
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
 
 app.use(cors());
 app.use(express.json());
@@ -12,20 +16,35 @@ app.use(express.json());
 const SERVER_STARTED_AT = new Date().toISOString();
 
 /* =========================
-   유틸
+   SYMBOL CONFIG
+========================= */
+
+const SYMBOL_CONFIG = {
+  EURUSD: { category: "FOREX", displayName: "Euro / U.S. Dollar", basePrice: 1.0873, spread: 0.0001, digits: 5 },
+  USDJPY: { category: "FOREX", displayName: "U.S. Dollar / Japanese Yen", basePrice: 149.42, spread: 0.01, digits: 3 },
+  GBPUSD: { category: "FOREX", displayName: "British Pound / U.S. Dollar", basePrice: 1.2734, spread: 0.00012, digits: 5 },
+  AUDUSD: { category: "FOREX", displayName: "Australian Dollar / U.S. Dollar", basePrice: 0.6572, spread: 0.0001, digits: 5 },
+
+  BTC: { category: "CRYPTO", displayName: "Bitcoin", basePrice: 71484.56, spread: 0.8, digits: 2 },
+  ETH: { category: "CRYPTO", displayName: "Ethereum", basePrice: 2181.52, spread: 0.25, digits: 2 },
+  SOL: { category: "CRYPTO", displayName: "Solana", basePrice: 92.11, spread: 0.04, digits: 2 },
+  XRP: { category: "CRYPTO", displayName: "XRP", basePrice: 1.447, spread: 0.002, digits: 4 },
+
+  GOLD: { category: "COMMODITIES", displayName: "Gold", basePrice: 2179.4, spread: 0.35, digits: 2 },
+  SILVER: { category: "COMMODITIES", displayName: "Silver", basePrice: 24.84, spread: 0.03, digits: 2 },
+  NASDAQ: { category: "INDICES", displayName: "Nasdaq 100", basePrice: 18162.3, spread: 1.2, digits: 1 },
+  SP500: { category: "INDICES", displayName: "S&P 500", basePrice: 5142.7, spread: 0.8, digits: 1 }
+};
+
+const STREAM_INTERVAL_MS = 1500;
+
+/* =========================
+   UTILS
 ========================= */
 
 function toNumber(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
-}
-
-function pick(...vals) {
-  for (const v of vals) {
-    const n = toNumber(v);
-    if (n && n > 0) return n;
-  }
-  return null;
 }
 
 function normalizeSymbol(input) {
@@ -34,28 +53,190 @@ function normalizeSymbol(input) {
   let raw = String(input)
     .trim()
     .toUpperCase()
-    .replace(/_/g, "-")
-    .replace(/\//g, "-");
+    .replace(/\//g, "-")
+    .replace(/_/g, "-");
 
   const parts = raw.split("-").filter(Boolean);
-  const ignore = ["PERP", "USDT", "USDC", "USD"];
+  const ignore = ["PERP", "USDT", "USDC", "USD", "T"];
+
+  if (parts.length === 1) return raw;
 
   const base = parts.find((p) => !ignore.includes(p));
   return base || parts[0] || raw;
 }
 
-function resolveTradingPrice(s) {
-  if (!s) return null;
+function toTradingViewSymbol(input) {
+  const symbol = normalizeSymbol(input);
 
-  return pick(
-    s.liveTradingPrice,
-    s.markPrice,
-    s.lastPrice,
-    s.price,
-    s.tradePrice,
-    s.close,
-    s.indexPrice
-  );
+  const map = {
+    EURUSD: "FX:EURUSD",
+    USDJPY: "FX:USDJPY",
+    GBPUSD: "FX:GBPUSD",
+    AUDUSD: "FX:AUDUSD",
+
+    BTC: "BINANCE:BTCUSDT",
+    ETH: "BINANCE:ETHUSDT",
+    SOL: "BINANCE:SOLUSDT",
+    XRP: "BINANCE:XRPUSDT",
+
+    GOLD: "OANDA:XAUUSD",
+    SILVER: "OANDA:XAGUSD",
+    NASDAQ: "OANDA:NAS100USD",
+    SP500: "OANDA:SPX500USD"
+  };
+
+  return map[symbol] || symbol;
+}
+
+function ensureSymbol(input) {
+  const symbol = normalizeSymbol(input);
+  if (!symbol || !SYMBOL_CONFIG[symbol]) return null;
+  return symbol;
+}
+
+function roundPrice(value, digits = 2) {
+  return Number(Number(value).toFixed(digits));
+}
+
+function getDigits(symbol) {
+  return SYMBOL_CONFIG[symbol]?.digits ?? 2;
+}
+
+function pseudoRandom(seed) {
+  const x = Math.sin(seed) * 10000;
+  return x - Math.floor(x);
+}
+
+function generateQuote(symbol) {
+  const config = SYMBOL_CONFIG[symbol];
+  const now = Date.now();
+  const timeFactor = now / 1000;
+
+  const noise = (pseudoRandom(timeFactor + config.basePrice) - 0.5);
+  const trend = Math.sin(timeFactor / 60) * 0.001;
+  const volatilityFactor =
+    symbol === "BTC" || symbol === "ETH" || symbol === "SOL" || symbol === "XRP"
+      ? config.basePrice * 0.0025
+      : config.basePrice * 0.00035;
+
+  const move = (noise * volatilityFactor) + (trend * config.basePrice);
+  const mid = config.basePrice + move;
+
+  const bid = roundPrice(mid - config.spread / 2, getDigits(symbol));
+  const ask = roundPrice(mid + config.spread / 2, getDigits(symbol));
+  const last = roundPrice((bid + ask) / 2, getDigits(symbol));
+  const dailyOpen = config.basePrice;
+  const change = last - dailyOpen;
+  const changePercent = Number(((change / dailyOpen) * 100).toFixed(2));
+
+  return {
+    symbol,
+    displayName: config.displayName,
+    category: config.category,
+    bid,
+    ask,
+    last,
+    mid: last,
+    spread: roundPrice(ask - bid, getDigits(symbol)),
+    change,
+    changePercent,
+    tradingViewSymbol: toTradingViewSymbol(symbol),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function intervalToMs(interval) {
+  const map = {
+    "1m": 60 * 1000,
+    "5m": 5 * 60 * 1000,
+    "15m": 15 * 60 * 1000,
+    "30m": 30 * 60 * 1000,
+    "1h": 60 * 60 * 1000,
+    "4h": 4 * 60 * 60 * 1000,
+    "1d": 24 * 60 * 60 * 1000
+  };
+
+  return map[interval] || map["15m"];
+}
+
+function generateCandles(symbol, interval = "15m", limit = 200) {
+  const config = SYMBOL_CONFIG[symbol];
+  const intervalMs = intervalToMs(interval);
+  const digits = getDigits(symbol);
+  const now = Date.now();
+
+  const candles = [];
+  let previousClose = config.basePrice;
+
+  for (let i = limit - 1; i >= 0; i -= 1) {
+    const time = now - (i * intervalMs);
+    const factorA = Math.sin(time / 300000);
+    const factorB = Math.cos(time / 900000);
+    const volatility =
+      symbol === "BTC" || symbol === "ETH" || symbol === "SOL" || symbol === "XRP"
+        ? config.basePrice * 0.004
+        : config.basePrice * 0.0008;
+
+    const drift = (factorA + factorB) * volatility * 0.25;
+    const open = previousClose;
+    const close = open + drift + ((pseudoRandom(time) - 0.5) * volatility * 0.35);
+
+    const highBase = Math.max(open, close);
+    const lowBase = Math.min(open, close);
+
+    const high = highBase + (pseudoRandom(time + 1) * volatility * 0.2);
+    const low = lowBase - (pseudoRandom(time + 2) * volatility * 0.2);
+
+    const volume =
+      symbol === "BTC" || symbol === "ETH" || symbol === "SOL" || symbol === "XRP"
+        ? Math.round(1000 + pseudoRandom(time + 3) * 9000)
+        : Math.round(50 + pseudoRandom(time + 3) * 350);
+
+    const candle = {
+      time: new Date(time).toISOString(),
+      timestamp: time,
+      open: roundPrice(open, digits),
+      high: roundPrice(high, digits),
+      low: roundPrice(low, digits),
+      close: roundPrice(close, digits),
+      volume
+    };
+
+    candles.push(candle);
+    previousClose = candle.close;
+  }
+
+  return candles;
+}
+
+function buildSymbolList() {
+  return Object.entries(SYMBOL_CONFIG).map(([symbol, config]) => {
+    const quote = generateQuote(symbol);
+
+    return {
+      symbol,
+      displayName: config.displayName,
+      category: config.category,
+      tradingViewSymbol: toTradingViewSymbol(symbol),
+      last: quote.last,
+      bid: quote.bid,
+      ask: quote.ask,
+      spread: quote.spread,
+      changePercent: quote.changePercent
+    };
+  });
+}
+
+function getHealthChecks() {
+  return {
+    root: true,
+    marketData: true,
+    quotes: true,
+    candles: true,
+    newsService: true,
+    salesSubmit: true,
+    websocket: true
+  };
 }
 
 /* =========================
@@ -71,20 +252,85 @@ app.get("/", (req, res) => {
   });
 });
 
-app.get("/health", async (req, res) => {
-  const checks = {
-    root: true,
-    marketData: true,
-    newsService: true,
-    salesSubmit: true
-  };
-
+app.get("/health", (req, res) => {
   res.json({
     success: true,
     status: "healthy",
-    checks,
+    checks: getHealthChecks(),
     startedAt: SERVER_STARTED_AT,
     now: new Date().toISOString()
+  });
+});
+
+/* =========================
+   SYMBOLS
+========================= */
+
+app.get("/symbols", (req, res) => {
+  const category = String(req.query.category || "").trim().toUpperCase();
+
+  let data = buildSymbolList();
+
+  if (category) {
+    data = data.filter((item) => item.category === category);
+  }
+
+  res.json({
+    success: true,
+    count: data.length,
+    fetchedAt: new Date().toISOString(),
+    data
+  });
+});
+
+/* =========================
+   QUOTES
+========================= */
+
+app.get("/quotes", (req, res) => {
+  const symbol = ensureSymbol(req.query.symbol || "");
+
+  if (!symbol) {
+    return res.status(400).json({
+      success: false,
+      message: "valid symbol query is required"
+    });
+  }
+
+  const quote = generateQuote(symbol);
+
+  res.json({
+    success: true,
+    fetchedAt: new Date().toISOString(),
+    data: quote
+  });
+});
+
+/* =========================
+   CANDLES
+========================= */
+
+app.get("/candles", (req, res) => {
+  const symbol = ensureSymbol(req.query.symbol || "");
+  const interval = String(req.query.interval || "15m");
+  const limit = Math.min(Number(req.query.limit) || 200, 1000);
+
+  if (!symbol) {
+    return res.status(400).json({
+      success: false,
+      message: "valid symbol query is required"
+    });
+  }
+
+  const data = generateCandles(symbol, interval, limit);
+
+  res.json({
+    success: true,
+    symbol,
+    interval,
+    count: data.length,
+    fetchedAt: new Date().toISOString(),
+    data
   });
 });
 
@@ -93,42 +339,18 @@ app.get("/health", async (req, res) => {
 ========================= */
 
 app.get("/market-data", (req, res) => {
-  const requestedSymbol = normalizeSymbol(req.query.symbol || "");
+  const requestedSymbol = ensureSymbol(req.query.symbol || "");
 
-  const raw = [
-    {
-      symbol: "ETH-PERP",
-      markPrice: "3824.17",
-      lastPrice: "3823.90",
-      indexPrice: "3824.01"
-    },
-    {
-      symbol: "BTC-PERP",
-      markPrice: "118220.2",
-      lastPrice: "118210.8",
-      indexPrice: "118215.5"
-    },
-    {
-      symbol: "SOL-PERP",
-      markPrice: "191.22",
-      lastPrice: "191.18",
-      indexPrice: "191.11"
-    },
-    {
-      symbol: "XRP-PERP",
-      markPrice: "1.447",
-      lastPrice: "1.444",
-      indexPrice: "1.445"
-    }
-  ];
-
-  let data = raw.map((item) => ({
-    symbol: item.symbol,
-    normalizedSymbol: normalizeSymbol(item.symbol),
-    markPrice: toNumber(item.markPrice),
-    lastPrice: toNumber(item.lastPrice),
-    indexPrice: toNumber(item.indexPrice),
-    liveTradingPrice: resolveTradingPrice(item)
+  let data = buildSymbolList().map((item) => ({
+    symbol: `${item.symbol}-T`,
+    normalizedSymbol: item.symbol,
+    tradingViewSymbol: item.tradingViewSymbol,
+    bid: item.bid,
+    ask: item.ask,
+    lastPrice: item.last,
+    liveTradingPrice: item.last,
+    spread: item.spread,
+    changePercent: item.changePercent
   }));
 
   if (requestedSymbol) {
@@ -145,16 +367,11 @@ app.get("/market-data", (req, res) => {
 
 /* =========================
    NEWS
-   Examples:
-   /news?symbol=BTC
-   /news?symbol=ETH&limit=10
-   /news?symbol=SOL&region=ko
-   /news?symbol=XRP&sort=relevance
 ========================= */
 
 app.get("/news", async (req, res) => {
   try {
-    const symbol = normalizeSymbol(req.query.symbol || "");
+    const symbol = ensureSymbol(req.query.symbol || "");
     const limit = Math.min(Number(req.query.limit) || 20, 50);
     const region = ["all", "ko", "global"].includes(String(req.query.region || "all"))
       ? String(req.query.region || "all")
@@ -164,15 +381,11 @@ app.get("/news", async (req, res) => {
     if (!symbol) {
       return res.status(400).json({
         success: false,
-        message: "symbol query is required"
+        message: "valid symbol query is required"
       });
     }
 
-    const result = await getNewsBySymbol(symbol, {
-      limit,
-      region,
-      sort
-    });
+    const result = await getNewsBySymbol(symbol, { limit, region, sort });
 
     const sentimentCounts = result.data.reduce(
       (acc, item) => {
@@ -195,7 +408,6 @@ app.get("/news", async (req, res) => {
     });
   } catch (error) {
     console.error("/news error:", error);
-
     res.status(500).json({
       success: false,
       message: "Failed to fetch news"
@@ -242,10 +454,88 @@ app.post("/sales/submit", (req, res) => {
   });
 });
 
+/* =========================
+   WEBSOCKET STREAM
+========================= */
+
+function sendJson(ws, payload) {
+  if (ws.readyState === ws.OPEN) {
+    ws.send(JSON.stringify(payload));
+  }
+}
+
+function parseStreamSymbols(url) {
+  try {
+    const parsed = new URL(url, "http://localhost");
+    const symbolsParam = parsed.searchParams.get("symbols") || parsed.searchParams.get("symbol") || "";
+    const normalized = symbolsParam
+      .split(",")
+      .map((s) => ensureSymbol(s))
+      .filter(Boolean);
+
+    return normalized.length > 0 ? normalized : ["EURUSD"];
+  } catch {
+    return ["EURUSD"];
+  }
+}
+
+wss.on("connection", (ws, req) => {
+  const subscribedSymbols = parseStreamSymbols(req.url);
+
+  sendJson(ws, {
+    type: "connected",
+    success: true,
+    subscribedSymbols,
+    connectedAt: new Date().toISOString()
+  });
+
+  const timer = setInterval(() => {
+    for (const symbol of subscribedSymbols) {
+      const quote = generateQuote(symbol);
+
+      sendJson(ws, {
+        type: "quote",
+        symbol,
+        data: quote
+      });
+    }
+  }, STREAM_INTERVAL_MS);
+
+  ws.on("close", () => {
+    clearInterval(timer);
+  });
+
+  ws.on("message", (message) => {
+    try {
+      const parsed = JSON.parse(String(message));
+
+      if (parsed?.type === "subscribe" && Array.isArray(parsed.symbols)) {
+        const nextSymbols = parsed.symbols
+          .map((s) => ensureSymbol(s))
+          .filter(Boolean);
+
+        if (nextSymbols.length > 0) {
+          subscribedSymbols.length = 0;
+          subscribedSymbols.push(...nextSymbols);
+
+          sendJson(ws, {
+            type: "subscribed",
+            success: true,
+            subscribedSymbols,
+            updatedAt: new Date().toISOString()
+          });
+        }
+      }
+    } catch {
+      // ignore malformed messages
+    }
+  });
+});
+
 /* ========================= */
 
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`🚀 SolFort Server Running on ${PORT}`);
 });
