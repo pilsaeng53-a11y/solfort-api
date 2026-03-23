@@ -1,7 +1,7 @@
 {
   "name": "solfort-server",
-  "version": "1.4.0",
-  "description": "SolFort Backend with market quotes, candles, news, stream, and prediction market aggregation",
+  "version": "1.4.1",
+  "description": "SolFort Backend with market quotes, candles, news, stream, and safe prediction market aggregation",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
