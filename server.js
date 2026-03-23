@@ -326,17 +326,36 @@ function getHealthChecks() {
    PREDICTION AGGREGATOR
 ========================= */
 
-async function fetchPolymarketMarkets() {
-  const url = "https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=200";
-  const res = await fetch(url);
+async function fetchAllPolymarketMarkets() {
+  let offset = 0;
+  const pageSize = 200;
+  let allRows = [];
+  let keepGoing = true;
 
-  if (!res.ok) {
-    throw new Error(`Polymarket fetch failed: ${res.status}`);
+  while (keepGoing) {
+    const url = `https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=${pageSize}&offset=${offset}`;
+    const res = await fetch(url);
+
+    if (!res.ok) {
+      throw new Error(`Polymarket fetch failed: ${res.status}`);
+    }
+
+    const rows = await res.json();
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+      break;
+    }
+
+    allRows = allRows.concat(rows);
+
+    if (rows.length < pageSize) {
+      keepGoing = false;
+    } else {
+      offset += pageSize;
+    }
   }
 
-  const rows = await res.json();
-
-  return rows.map((row) => {
+  return allRows.map((row) => {
     let outcomes = [];
     let prices = [];
 
@@ -379,33 +398,46 @@ async function fetchPolymarketMarkets() {
   });
 }
 
-async function fetchKalshiEventsAndMarkets() {
-  const endpoints = [
-    "https://api.elections.kalshi.com/trade-api/v2/events?limit=200",
-    "https://api.elections.kalshi.com/trade-api/v2/events?status=open&limit=200"
-  ];
+async function fetchKalshiEventsPage(cursor = "") {
+  const base = "https://api.elections.kalshi.com/trade-api/v2/events";
+  const qs = new URLSearchParams({
+    limit: "200",
+    with_nested_markets: "true"
+  });
 
-  let json = null;
+  if (cursor) qs.set("cursor", cursor);
 
-  for (const endpoint of endpoints) {
-    try {
-      const res = await fetch(endpoint);
-      if (!res.ok) continue;
-      json = await res.json();
-      if (json) break;
-    } catch {
-      // try next endpoint
+  const res = await fetch(`${base}?${qs.toString()}`);
+
+  if (!res.ok) {
+    throw new Error(`Kalshi fetch failed: ${res.status}`);
+  }
+
+  return res.json();
+}
+
+async function fetchAllKalshiEventsAndMarkets() {
+  let cursor = "";
+  let allEvents = [];
+  let keepGoing = true;
+
+  while (keepGoing) {
+    const json = await fetchKalshiEventsPage(cursor);
+    const events = json.events || json.data?.events || [];
+
+    allEvents = allEvents.concat(events);
+
+    const nextCursor = json.cursor || json.data?.cursor || "";
+    if (!nextCursor || events.length === 0) {
+      keepGoing = false;
+    } else {
+      cursor = nextCursor;
     }
   }
 
-  if (!json) {
-    throw new Error("Kalshi fetch failed");
-  }
-
-  const events = json.events || json.data?.events || [];
   const markets = [];
 
-  for (const event of events) {
+  for (const event of allEvents) {
     const category = normalizePredictionCategory(
       event.category || event.series_ticker || event.series_title || "Global"
     );
@@ -453,8 +485,8 @@ async function fetchKalshiEventsAndMarkets() {
 
 async function refreshPredictionMarkets() {
   const [poly, kalshi] = await Promise.allSettled([
-    fetchPolymarketMarkets(),
-    fetchKalshiEventsAndMarkets()
+    fetchAllPolymarketMarkets(),
+    fetchAllKalshiEventsAndMarkets()
   ]);
 
   const merged = [
@@ -743,7 +775,7 @@ app.get("/prediction/markets", (req, res) => {
 
   const rows = filterPredictionMarkets({ category, source, sort }).slice(
     0,
-    Math.max(1, Math.min(Number(limit) || 100, 500))
+    Math.max(1, Math.min(Number(limit) || 100, 1000))
   );
 
   res.json({
@@ -755,9 +787,9 @@ app.get("/prediction/markets", (req, res) => {
 });
 
 app.get("/prediction/top", (req, res) => {
-  const highestOdds = filterPredictionMarkets({ sort: "highest-odds" }).slice(0, 20);
-  const mostPopular = filterPredictionMarkets({ sort: "popular" }).slice(0, 20);
-  const trending = filterPredictionMarkets({ sort: "trending" }).slice(0, 20);
+  const highestOdds = filterPredictionMarkets({ sort: "highest-odds" }).slice(0, 50);
+  const mostPopular = filterPredictionMarkets({ sort: "popular" }).slice(0, 50);
+  const trending = filterPredictionMarkets({ sort: "trending" }).slice(0, 50);
 
   res.json({
     success: true,
