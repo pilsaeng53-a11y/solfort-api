@@ -454,37 +454,35 @@ function createBinaryUpDownMarket(symbol, timeframe) {
   const resolutionDate = getNextResolutionDate(timeframe.minutes);
   const lockDate = new Date(resolutionDate.getTime() - BET_LOCK_SECONDS * 1000);
 
-  const driftSeed = safeNum(quote.changePercent, 0);
-  const baseProb = 0.5 + Math.max(Math.min(driftSeed / 100, 0.12), -0.12);
+  const baseProb = 0.5;
 
   return {
     source: "solfort",
-    externalId: solfort-${symbol.toLowerCase()}-${timeframe.key}-updown,
-    slug: ${symbol.toLowerCase()}-${timeframe.key}-updown,
-    question: Will ${symbol} close ${timeframe.label} higher than now?,
+    externalId: `solfort-${symbol.toLowerCase()}-${timeframe.key}-updown`,
+    slug: `${symbol.toLowerCase()}-${timeframe.key}-updown`,
+    question: `Will ${symbol} close ${timeframe.label} higher than now?`,
     category: "Crypto",
-    subcategory: timeframe.key === "5m" || timeframe.key === "15m"
-      ? "Ultra Short"
-      : timeframe.key === "1h"
-      ? "Hourly"
-      : timeframe.key === "4h"
-      ? "4H"
-      : "Daily",
+    subcategory: timeframe.key,
+
     marketType: "binary",
-    outcomes: buildCustomOutcome(baseProb),
-    volume: Math.round(5000 + Math.random() * 50000),
+    outcomes: [
+      {
+        name: "Yes",
+        probability: baseProb,
+        payout: payoutFromProb(baseProb)
+      },
+      {
+        name: "No",
+        probability: 1 - baseProb,
+        payout: payoutFromProb(1 - baseProb)
+      }
+    ],
+
+    volume: Math.floor(Math.random() * 10000),
     endsAt: resolutionDate.toISOString(),
     lockAt: lockDate.toISOString(),
     lockSeconds: BET_LOCK_SECONDS,
-    status: new Date() >= lockDate ? "locked" : "open",
-    image: null,
-    metadata: {
-      symbol,
-      timeframe: timeframe.key,
-      resolutionType: "up-down",
-      referenceSymbol: ${symbol}USDT,
-      lockRule: Betting closes ${BET_LOCK_SECONDS} seconds before resolution
-    }
+    status: new Date() >= lockDate ? "locked" : "open"
   };
 }
 
