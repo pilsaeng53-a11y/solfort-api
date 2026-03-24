@@ -1,5 +1,5 @@
 // server.js
-// FULL VERSION - SOLFORT PRE-DB MARKET ENGINE + SAFE PREDICTION AGGREGATOR + CUSTOM CRYPTO MARKETS
+// FULL VERSION - SOLFORT PRE-DB MARKET ENGINE + SAFE PREDICTION AGGREGATOR + ARCHIVE SUPPORT
 
 const express = require("express");
 const cors = require("cors");
@@ -31,7 +31,7 @@ const PREDICTION_REFRESH_MS = 3 * 60 * 1000; // 3분
 const MAX_POLY_MARKETS = 350;
 const MAX_KALSHI_EVENTS = 220;
 const MAX_TOTAL_PREDICTION_MARKETS = 500;
-
+const MAX_ARCHIVED_PREDICTION_MARKETS = 2000;
 const BET_LOCK_SECONDS = 20;
 
 /* =========================
@@ -70,7 +70,8 @@ const CUSTOM_CRYPTO_TIMEFRAMES = [
 
 const predictionCache = {
   updatedAt: null,
-  markets: [],
+  markets: [],          // latest active/latest snapshot
+  archivedMarkets: [],  // ended / removed / older snapshots
   categories: [],
   stats: {
     lastRefreshStatus: "idle",
@@ -78,7 +79,8 @@ const predictionCache = {
     polymarketCount: 0,
     kalshiCount: 0,
     customCount: 0,
-    totalMerged: 0
+    totalMerged: 0,
+    archivedCount: 0
   }
 };
 
@@ -111,6 +113,19 @@ function titleCase(input) {
 function pseudoRandom(seed) {
   const x = Math.sin(seed) * 10000;
   return x - Math.floor(x);
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function safeDateMs(value) {
+  const t = value ? new Date(value).getTime() : NaN;
+  return Number.isFinite(t) ? t : null;
+}
+
+function marketKey(source, externalId) {
+  return `${String(source)}::${String(externalId)}`;
 }
 
 async function fetchJsonWithTimeout(url, timeoutMs = FETCH_TIMEOUT_MS) {
@@ -229,7 +244,7 @@ function generateQuote(symbol) {
     change,
     changePercent,
     tradingViewSymbol: toTradingViewSymbol(symbol),
-    updatedAt: new Date().toISOString()
+    updatedAt: nowIso()
   };
 }
 
@@ -257,7 +272,7 @@ function generateCandles(symbol, interval = "15m", limit = 200) {
   let previousClose = config.basePrice;
 
   for (let i = limit - 1; i >= 0; i -= 1) {
-    const time = now - i * intervalMs;
+    const time = now - (i * intervalMs);
     const factorA = Math.sin(time / 300000);
     const factorB = Math.cos(time / 900000);
 
@@ -339,20 +354,24 @@ function normalizePredictionCategory(input) {
     culture: "Culture",
     crypto: "Crypto",
     climate: "Climate",
+    "climate and weather": "Climate And Weather",
     economy: "Economics",
     economics: "Economics",
-    mentions: "Global",
-    global: "Global",
+    mentions: "Social",
+    social: "Social",
+    global: "World",
+    world: "World",
     companies: "Companies",
     company: "Companies",
     financials: "Financials",
     finance: "Financials",
-    tech: "Tech & Science",
-    technology: "Tech & Science",
-    science: "Tech & Science"
+    tech: "Science And Technology",
+    technology: "Science And Technology",
+    science: "Science And Technology",
+    entertainment: "Entertainment"
   };
 
-  return map[raw] || titleCase(raw || "Global");
+  return map[raw] || titleCase(raw || "World");
 }
 
 function buildPredictionCategories(markets) {
@@ -392,6 +411,7 @@ function sanitizePredictionMarkets(markets) {
       category: normalizePredictionCategory(m.category),
       subcategory: m.subcategory ? String(m.subcategory).trim() : null,
       volume: safeNum(m.volume, 0),
+      status: m.status || "open",
       outcomes: m.outcomes
         .filter((o) => o && o.name)
         .slice(0, 12)
@@ -408,7 +428,7 @@ function dedupePredictionMarkets(markets) {
   const result = [];
 
   for (const market of markets) {
-    const key = `${market.source}:${market.externalId}`;
+    const key = marketKey(market.source, market.externalId);
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(market);
@@ -428,8 +448,8 @@ function sortPredictionMarkets(rows, sort = "popular") {
     next.sort((a, b) => safeNum(b.trendingScore, 0) - safeNum(a.trendingScore, 0));
   } else if (sort === "ending-soon") {
     next.sort((a, b) => {
-      const aTime = a.endsAt ? new Date(a.endsAt).getTime() : Number.MAX_SAFE_INTEGER;
-      const bTime = b.endsAt ? new Date(b.endsAt).getTime() : Number.MAX_SAFE_INTEGER;
+      const aTime = safeDateMs(a.endsAt) ?? Number.MAX_SAFE_INTEGER;
+      const bTime = safeDateMs(b.endsAt) ?? Number.MAX_SAFE_INTEGER;
       return aTime - bTime;
     });
   } else {
@@ -437,6 +457,58 @@ function sortPredictionMarkets(rows, sort = "popular") {
   }
 
   return next;
+}
+
+function getPredictionPhase(market) {
+  const now = Date.now();
+  const endMs = safeDateMs(market.endsAt);
+  const lockMs = safeDateMs(market.lockAt);
+
+  if (endMs && now >= endMs) return "resolved";
+  if (lockMs && now >= lockMs) return "locked";
+  return "open";
+}
+
+function applyPredictionPhase(market) {
+  const phase = getPredictionPhase(market);
+  return {
+    ...market,
+    status: phase
+  };
+}
+
+function archiveMarketIfNeeded(market, reason = "expired") {
+  const key = marketKey(market.source, market.externalId);
+  const exists = predictionCache.archivedMarkets.some(
+    (m) => marketKey(m.source, m.externalId) === key
+  );
+
+  if (exists) return;
+
+  predictionCache.archivedMarkets.unshift({
+    ...market,
+    archivedAt: nowIso(),
+    archiveReason: reason
+  });
+
+  if (predictionCache.archivedMarkets.length > MAX_ARCHIVED_PREDICTION_MARKETS) {
+    predictionCache.archivedMarkets = predictionCache.archivedMarkets.slice(0, MAX_ARCHIVED_PREDICTION_MARKETS);
+  }
+}
+
+function splitActiveAndResolved(markets) {
+  const active = [];
+  const resolved = [];
+
+  for (const market of markets.map(applyPredictionPhase)) {
+    if (market.status === "resolved") {
+      resolved.push(market);
+    } else {
+      active.push(market);
+    }
+  }
+
+  return { active, resolved };
 }
 
 /* =========================
@@ -689,7 +761,7 @@ async function fetchAllKalshiEventsAndMarkets() {
 
   for (const event of allEvents) {
     const category = normalizePredictionCategory(
-      event.category || event.series_ticker || event.series_title || "Global"
+      event.category || event.series_ticker || event.series_title || "World"
     );
 
     const eventMarkets = Array.isArray(event.markets) ? event.markets : [];
@@ -741,6 +813,10 @@ async function fetchAllKalshiEventsAndMarkets() {
   return markets;
 }
 
+/* =========================
+   PREDICTION REFRESH
+========================= */
+
 async function refreshPredictionMarkets() {
   if (isPredictionRefreshing) {
     console.log("[prediction] refresh skipped (already running)");
@@ -765,24 +841,46 @@ async function refreshPredictionMarkets() {
     merged = sanitizePredictionMarkets(merged);
     merged = dedupePredictionMarkets(merged);
     merged = rankPredictionMarkets(merged);
-    merged = merged
+
+    const { active, resolved } = splitActiveAndResolved(merged);
+
+    for (const market of resolved) {
+      archiveMarketIfNeeded(market, "resolved");
+    }
+
+    const previousActiveMap = new Map(
+      predictionCache.markets.map((m) => [marketKey(m.source, m.externalId), m])
+    );
+
+    const nextActiveMap = new Map(
+      active.map((m) => [marketKey(m.source, m.externalId), m])
+    );
+
+    for (const [key, previousMarket] of previousActiveMap.entries()) {
+      if (!nextActiveMap.has(key)) {
+        archiveMarketIfNeeded(previousMarket, "missing_from_latest_snapshot");
+      }
+    }
+
+    const nextActive = active
       .sort((a, b) => safeNum(b.popularityScore, 0) - safeNum(a.popularityScore, 0))
       .slice(0, MAX_TOTAL_PREDICTION_MARKETS);
 
-    predictionCache.markets = merged;
-    predictionCache.categories = buildPredictionCategories(merged);
-    predictionCache.updatedAt = new Date().toISOString();
+    predictionCache.markets = nextActive;
+    predictionCache.categories = buildPredictionCategories(nextActive);
+    predictionCache.updatedAt = nowIso();
     predictionCache.stats = {
       lastRefreshStatus: "ok",
       lastError: null,
       polymarketCount: polyMarkets.length,
       kalshiCount: kalshiMarkets.length,
       customCount: customMarkets.length,
-      totalMerged: merged.length
+      totalMerged: nextActive.length,
+      archivedCount: predictionCache.archivedMarkets.length
     };
 
     console.log(
-      `[prediction] updated=${predictionCache.updatedAt} total=${merged.length} poly=${polyMarkets.length} kalshi=${kalshiMarkets.length} custom=${customMarkets.length}`
+      `[prediction] updated=${predictionCache.updatedAt} active=${nextActive.length} archived=${predictionCache.archivedMarkets.length} poly=${polyMarkets.length} kalshi=${kalshiMarkets.length} custom=${customMarkets.length}`
     );
   } catch (e) {
     predictionCache.stats.lastRefreshStatus = "failed";
@@ -819,7 +917,7 @@ app.get("/", (req, res) => {
     ok: true,
     service: "SolFort API",
     startedAt: SERVER_STARTED_AT,
-    now: new Date().toISOString()
+    now: nowIso()
   });
 });
 
@@ -829,7 +927,7 @@ app.get("/health", (req, res) => {
     status: "healthy",
     checks: getHealthChecks(),
     startedAt: SERVER_STARTED_AT,
-    now: new Date().toISOString()
+    now: nowIso()
   });
 });
 
@@ -849,7 +947,7 @@ app.get("/symbols", (req, res) => {
   res.json({
     success: true,
     count: data.length,
-    fetchedAt: new Date().toISOString(),
+    fetchedAt: nowIso(),
     data
   });
 });
@@ -872,7 +970,7 @@ app.get("/quotes", (req, res) => {
 
   res.json({
     success: true,
-    fetchedAt: new Date().toISOString(),
+    fetchedAt: nowIso(),
     data: quote
   });
 });
@@ -900,7 +998,7 @@ app.get("/candles", (req, res) => {
     symbol,
     interval,
     count: data.length,
-    fetchedAt: new Date().toISOString(),
+    fetchedAt: nowIso(),
     data
   });
 });
@@ -931,7 +1029,7 @@ app.get("/market-data", (req, res) => {
   res.json({
     success: true,
     count: data.length,
-    fetchedAt: new Date().toISOString(),
+    fetchedAt: nowIso(),
     data
   });
 });
@@ -973,7 +1071,7 @@ app.get("/news", async (req, res) => {
       sort,
       count: result.data.length,
       cache: result.cache,
-      fetchedAt: new Date().toISOString(),
+      fetchedAt: nowIso(),
       sentimentCounts,
       data: result.data
     });
@@ -1016,7 +1114,7 @@ app.post("/sales/submit", (req, res) => {
     price: toNumber(price),
     promotion: toNumber(promotion),
     sofAmount: toNumber(sofAmount),
-    createdAt: new Date().toISOString()
+    createdAt: nowIso()
   };
 
   res.json({
@@ -1053,17 +1151,51 @@ app.get("/prediction/markets", (req, res) => {
     category = "",
     source = "",
     sort = "popular",
-    limit = "100"
+    limit = "100",
+    status = ""
   } = req.query;
 
-  const rows = sortPredictionMarkets(
-    predictionCache.markets.filter((market) => {
-      const categoryOk = !category || String(market.category).toLowerCase() === String(category).toLowerCase();
-      const sourceOk = !source || String(market.source).toLowerCase() === String(source).toLowerCase();
-      return categoryOk && sourceOk;
-    }),
-    sort
-  ).slice(0, Math.max(1, Math.min(Number(limit) || 100, 1000)));
+  let rows = predictionCache.markets.filter((market) => {
+    const categoryOk = !category || String(market.category).toLowerCase() === String(category).toLowerCase();
+    const sourceOk = !source || String(market.source).toLowerCase() === String(source).toLowerCase();
+    const statusOk = !status || String(market.status).toLowerCase() === String(status).toLowerCase();
+    return categoryOk && sourceOk && statusOk;
+  });
+
+  rows = sortPredictionMarkets(rows, sort).slice(
+    0,
+    Math.max(1, Math.min(Number(limit) || 100, 1000))
+  );
+
+  res.json({
+    success: true,
+    updatedAt: predictionCache.updatedAt,
+    count: rows.length,
+    data: rows
+  });
+});
+
+app.get("/prediction/archive", (req, res) => {
+  const {
+    category = "",
+    source = "",
+    sort = "ending-soon",
+    limit = "100",
+    archiveReason = ""
+  } = req.query;
+
+  let rows = predictionCache.archivedMarkets.filter((market) => {
+    const categoryOk = !category || String(market.category).toLowerCase() === String(category).toLowerCase();
+    const sourceOk = !source || String(market.source).toLowerCase() === String(source).toLowerCase();
+    const reasonOk =
+      !archiveReason || String(market.archiveReason).toLowerCase() === String(archiveReason).toLowerCase();
+    return categoryOk && sourceOk && reasonOk;
+  });
+
+  rows = sortPredictionMarkets(rows, sort).slice(
+    0,
+    Math.max(1, Math.min(Number(limit) || 100, 1000))
+  );
 
   res.json({
     success: true,
@@ -1094,9 +1226,13 @@ app.get("/prediction/top", (req, res) => {
 app.get("/prediction/market/:source/:id", (req, res) => {
   const { source, id } = req.params;
 
-  const market = predictionCache.markets.find(
-    (m) => m.source === source && String(m.externalId) === String(id)
-  );
+  const market =
+    predictionCache.markets.find(
+      (m) => m.source === source && String(m.externalId) === String(id)
+    ) ||
+    predictionCache.archivedMarkets.find(
+      (m) => m.source === source && String(m.externalId) === String(id)
+    );
 
   if (!market) {
     return res.status(404).json({
@@ -1144,7 +1280,7 @@ wss.on("connection", (ws, req) => {
     type: "connected",
     success: true,
     subscribedSymbols,
-    connectedAt: new Date().toISOString()
+    connectedAt: nowIso()
   });
 
   const timer = setInterval(() => {
@@ -1180,7 +1316,7 @@ wss.on("connection", (ws, req) => {
             type: "subscribed",
             success: true,
             subscribedSymbols,
-            updatedAt: new Date().toISOString()
+            updatedAt: nowIso()
           });
         }
       }
