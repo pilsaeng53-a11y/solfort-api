@@ -1,15 +1,14 @@
 {
-  "name": "solfort-server",
-  "version": "1.4.1",
-  "description": "SolFort Backend with market quotes, candles, news, stream, and safe prediction market aggregation",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
+  "name": "solfort-api",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
   "dependencies": {
+    "express": "^4.18.2",
     "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "rss-parser": "^3.13.0",
-    "ws": "^8.18.0"
+    "pg": "^8.11.3",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "dotenv": "^16.3.1"
   }
 }
