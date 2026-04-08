@@ -19,9 +19,9 @@ app.use(express.json());
 
 const auth = async (req, res, next) => {
   const token = req.headers.authorization?.replace('Bearer ', '');
-  if (!token) return res.status(401).json({ error: '인증 필요' });
+  if (!token) return res.status(401).json({ error: 'ì¸ì¦ íì' });
   try { req.user = jwt.verify(token, JWT_SECRET); next(); }
-  catch { res.status(401).json({ error: '유효하지 않은 토큰' }); }
+  catch { res.status(401).json({ error: 'ì í¨íì§ ìì í í°' }); }
 };
 
 app.post('/api/auth/login', async (req, res) => {
@@ -29,11 +29,11 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
     const user = result.rows[0];
-    if (!user) return res.status(401).json({ error: '아이디 또는 비밀번호가 틀렸습니다' });
+    if (!user) return res.status(401).json({ error: 'ìì´ë ëë ë¹ë°ë²í¸ê° íë ¸ìµëë¤' });
     const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) return res.status(401).json({ error: '아이디 또는 비밀번호가 틀렸습니다' });
-    if (user.status === 'pending') return res.status(403).json({ error: '승인 대기 중입니다' });
-    if (user.status === 'suspended') return res.status(403).json({ error: '계정이 정지되었습니다' });
+    if (!valid) return res.status(401).json({ error: 'ìì´ë ëë ë¹ë°ë²í¸ê° íë ¸ìµëë¤' });
+    if (user.status === 'pending') return res.status(403).json({ error: 'ì¹ì¸ ëê¸° ì¤ìëë¤' });
+    if (user.status === 'suspended') return res.status(403).json({ error: 'ê³ì ì´ ì ì§ëììµëë¤' });
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
     await pool.query('UPDATE users SET last_login_at=NOW(), last_login_ip=$1 WHERE id=$2', [ip, user.id]);
     const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
@@ -64,7 +64,7 @@ app.post('/api/auth/register', async (req, res) => {
     );
     res.json({ success: true, user: r.rows[0] });
   } catch (e) {
-    if (e.code==='23505') return res.status(400).json({ error: '이미 존재하는 아이디입니다' });
+    if (e.code==='23505') return res.status(400).json({ error: 'ì´ë¯¸ ì¡´ì¬íë ìì´ëìëë¤' });
     res.status(500).json({ error: e.message });
   }
 });
@@ -84,7 +84,7 @@ app.get('/api/users', auth, async (req,res) => {
 app.put('/api/users/:id', auth, async (req,res) => {
   const allowed=['name','phone','position','team_name','status','monthly_goal','incentive_rate','my_referral_code','parent_id','parent_name'];
   const updates=Object.entries(req.body).filter(([k])=>allowed.includes(k));
-  if(!updates.length) return res.status(400).json({error:'업데이트 필드 없음'});
+  if(!updates.length) return res.status(400).json({error:'ìë°ì´í¸ íë ìì'});
   const set=updates.map(([k],i)=>k+'=$'+(i+2)).join(', ');
   const vals=[req.params.id,...updates.map(([,v])=>v)];
   const r=await pool.query('UPDATE users SET '+set+',updated_at=NOW() WHERE id=$1 RETURNING *',vals);
@@ -124,7 +124,7 @@ app.post('/api/leads', auth, async (req,res) => {
   const {name,phone,status,amount,memo,caller_id,caller_name,source,next_call_date}=req.body;
   const r=await pool.query(
     'INSERT INTO call_leads (name,phone,status,amount,memo,caller_id,caller_name,source,next_call_date) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',
-    [name,phone,status||'신규',amount||0,memo,caller_id,caller_name,source||'manual',next_call_date]
+    [name,phone,status||'ì ê·',amount||0,memo,caller_id,caller_name,source||'manual',next_call_date]
   );
   res.json(r.rows[0]);
 });
@@ -141,7 +141,7 @@ app.put('/api/leads/:id', auth, async (req,res) => {
 app.get('/api/notices', auth, async (req,res) => {
   const {category}=req.query;
   let q="SELECT * FROM notices WHERE is_active=true"; const p=[];
-  if(category&&category!=='전체'){p.push(category);q+=" AND (category=$"+p.length+" OR category='전체')";}
+  if(category&&category!=='ì ì²´'){p.push(category);q+=" AND (category=$"+p.length+" OR category='ì ì²´')";}
   q+=' ORDER BY is_important DESC,created_at DESC';
   const r=await pool.query(q,p); res.json(r.rows);
 });
@@ -150,7 +150,7 @@ app.post('/api/notices', auth, async (req,res) => {
   const {title,content,category,is_important,file_url,expires_at}=req.body;
   const r=await pool.query(
     'INSERT INTO notices (title,content,category,is_important,file_url,expires_at,author_id,author_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',
-    [title,content,category||'전체',is_important||false,file_url,expires_at,req.user.id,req.user.username]
+    [title,content,category||'ì ì²´',is_important||false,file_url,expires_at,req.user.id,req.user.username]
   );
   res.json(r.rows[0]);
 });
@@ -252,7 +252,7 @@ app.get('/api/settlements', auth, async (req,res) => {
 app.put('/api/settlements/:id', auth, async (req,res) => {
   const {status}=req.body;
   const r=await pool.query(
-    "UPDATE sales_settlements SET status=$1,settled_at=CASE WHEN $1='지급완료' THEN NOW() ELSE settled_at END WHERE id=$2 RETURNING *",
+    "UPDATE sales_settlements SET status=$1,settled_at=CASE WHEN $1='ì§ê¸ìë£' THEN NOW() ELSE settled_at END WHERE id=$2 RETURNING *",
     [status,req.params.id]
   );
   res.json(r.rows[0]);
@@ -268,12 +268,12 @@ app.get('/api/scripts', auth, async (req,res) => {
 });
 
 app.post('/api/admin/assign-code', auth, async (req,res) => {
-  if(req.user.role!=='super_admin') return res.status(403).json({error:'권한 없음'});
+  if(req.user.role!=='super_admin') return res.status(403).json({error:'ê¶í ìì'});
   const {target_user_id,custom_code}=req.body;
   const chars='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   const code=custom_code||Array.from({length:6},()=>chars[Math.floor(Math.random()*chars.length)]).join('');
   const exists=await pool.query('SELECT id FROM users WHERE my_referral_code=$1',[code]);
-  if(exists.rows.length) return res.status(400).json({error:'이미 사용 중인 코드입니다'});
+  if(exists.rows.length) return res.status(400).json({error:'ì´ë¯¸ ì¬ì© ì¤ì¸ ì½ëìëë¤'});
   const r=await pool.query('UPDATE users SET my_referral_code=$1 WHERE id=$2 RETURNING id,name,username,my_referral_code',[code,target_user_id]);
   res.json({success:true,user:r.rows[0],code});
 });
@@ -281,14 +281,45 @@ app.post('/api/admin/assign-code', auth, async (req,res) => {
 app.post('/api/init-admin', async (req,res) => {
   try {
     const ex=await pool.query("SELECT id FROM users WHERE role='super_admin' LIMIT 1");
-    if(ex.rows.length) return res.status(400).json({error:'이미 초기화됨'});
+    if(ex.rows.length) return res.status(400).json({error:'ì´ë¯¸ ì´ê¸°íë¨'});
     const hash=await bcrypt.hash('solfort2026!',10);
     const r=await pool.query(
-      "INSERT INTO users (username,password_hash,name,role,status,my_referral_code) VALUES ('admin',$1,'총관리자','super_admin','active','ADMIN1') RETURNING id,username,name,role",
+      "INSERT INTO users (username,password_hash,name,role,status,my_referral_code) VALUES ('admin',$1,'ì´ê´ë¦¬ì','super_admin','active','ADMIN1') RETURNING id,username,name,role",
       [hash]
     );
-    res.json({success:true,user:r.rows[0],message:'초기 관리자 생성. ID: admin, PW: solfort2026!'});
+    res.json({success:true,user:r.rows[0],message:'ì´ê¸° ê´ë¦¬ì ìì±. ID: admin, PW: solfort2026!'});
   } catch(e){ res.status(500).json({error:e.message}); }
+});
+
+
+// 매출 승인
+app.put('/api/sales/:id/approve', auth, async (req,res) => {
+  if(!['super_admin','dealer_admin','call_admin','online_director'].includes(req.user.role))
+    return res.status(403).json({error:'권한 없음'});
+  const r = await pool.query(
+    "UPDATE sales_records SET status='approved',approved_by=$1,approved_at=NOW() WHERE id=$2 RETURNING *",
+    [req.user.username, req.params.id]
+  );
+  if(!r.rows.length) return res.status(404).json({error:'매출 없음'});
+  res.json(r.rows[0]);
+});
+
+// 매출 거절
+app.put('/api/sales/:id/reject', auth, async (req,res) => {
+  if(!['super_admin','dealer_admin','call_admin','online_director'].includes(req.user.role))
+    return res.status(403).json({error:'권한 없음'});
+  const {reason} = req.body;
+  const r = await pool.query(
+    "UPDATE sales_records SET status='rejected',reject_reason=$1 WHERE id=$2 RETURNING *",
+    [reason||'', req.params.id]
+  );
+  res.json(r.rows[0]);
+});
+
+// 매출 대기 목록
+app.get('/api/sales/pending', auth, async (req,res) => {
+  const r = await pool.query("SELECT * FROM sales_records WHERE status='active' OR status IS NULL ORDER BY registered_at DESC");
+  res.json(r.rows);
 });
 
 app.get('/health', async (req,res) => {
